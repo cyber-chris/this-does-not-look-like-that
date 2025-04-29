@@ -29,18 +29,18 @@ def _train_or_test(
     """
     is_train = optimizer is not None
     start = time.time()
+    dice_sum = 0
     n_examples = 0
-    n_correct = 0
     n_batches = 0
     total_cross_entropy = 0
     total_cluster_cost = 0
     # separation cost is meaningful only for class_specific
     total_separation_cost = 0
-    total_avg_separation_cost = 0
 
-    for i, (image, label) in enumerate(dataloader):
+    for i, (image, seg_mask) in enumerate(dataloader):
         input = image.cuda()
-        target = label.cuda()
+        target = seg_mask.cuda()
+        target = target.squeeze(1).long()
 
         # torch.enable_grad() has no effect outside of no_grad()
         grad_req = torch.enable_grad() if is_train else torch.no_grad()
@@ -54,64 +54,71 @@ def _train_or_test(
 
             # nn.Module has implemented __call__() function
             # so no need to call .forward
-            output, min_distances = model(input)
+            output, distances = model(input)
 
             # compute loss
             cross_entropy = torch.nn.functional.cross_entropy(output, target)
+            separation_cost = torch.tensor(0.0, device=input.device)
 
             if class_specific:
-                max_dist = (
-                    model.module.prototype_shape[1]
-                    * model.module.prototype_shape[2]
-                    * model.module.prototype_shape[3]
-                )
+                B, P, Hf, Wf = distances.shape
+                mask_down = torch.nn.functional.interpolate(
+                    target.unsqueeze(1).float(),
+                    size=(Hf, Wf),
+                    mode="nearest",
+                ).long().squeeze(1)
+                proto_id = model.module.prototype_class_identity.cuda()
 
-                # prototypes_of_correct_class is a tensor of shape batch_size * num_prototypes
-                # calculate cluster cost
-                prototypes_of_correct_class = torch.t(
-                    model.module.prototype_class_identity[:, label]
-                ).cuda()
-                inverted_distances, _ = torch.max(
-                    (max_dist - min_distances) * prototypes_of_correct_class, dim=1
-                )
-                cluster_cost = torch.mean(max_dist - inverted_distances)
+                # --- Build per‑pixel mask of “correct‑class” prototypes -------------
+                matches = proto_id[:, mask_down]             # (P, B, Hf, Wf)
+                proto_match = matches.permute(1, 0, 2, 3)    # (B, P, Hf, Wf)
+                proto_not_match = 1 - proto_match
 
-                # calculate separation cost
-                prototypes_of_wrong_class = 1 - prototypes_of_correct_class
-                inverted_distances_to_nontarget_prototypes, _ = torch.max(
-                    (max_dist - min_distances) * prototypes_of_wrong_class, dim=1
-                )
-                separation_cost = torch.mean(
-                    max_dist - inverted_distances_to_nontarget_prototypes
-                )
+                # --- Cluster cost: smallest distance to ANY correct‑class prototype -
+                INF = 1e6
+                dist_corr = distances + (proto_not_match * INF)  # mask out wrong protos
+                min_corr, _ = torch.min(dist_corr, dim=1)        # (B, Hf, Wf)
+                cluster_cost = torch.mean(min_corr)
 
-                # calculate avg cluster cost
-                avg_separation_cost = torch.sum(
-                    min_distances * prototypes_of_wrong_class, dim=1
-                ) / torch.sum(prototypes_of_wrong_class, dim=1)
-                avg_separation_cost = torch.mean(avg_separation_cost)
+                # --- Separation cost: (negative) smallest distance to ANY wrong‑class prototype
+                dist_wrong = distances + (proto_match * INF)     # mask out correct protos
+                min_wrong, _ = torch.min(dist_wrong, dim=1)      # (B, Hf, Wf)
+                separation_cost = -torch.mean(min_wrong)
 
+                # L1 regulariser on incorrect connections
                 if use_l1_mask:
-                    l1_mask = 1 - torch.t(model.module.prototype_class_identity).cuda()
+                    # prototype_class_identity: (num_prototypes, num_classes)
+                    # last_layer.weight:       (num_classes, num_prototypes, 1, 1)
+                    l1_mask = (
+                        1
+                        - torch.t(model.module.prototype_class_identity)
+                        .unsqueeze(-1)
+                        .unsqueeze(-1)
+                        .cuda()
+                    )
                     l1 = (model.module.last_layer.weight * l1_mask).norm(p=1)
                 else:
                     l1 = model.module.last_layer.weight.norm(p=1)
 
             else:
-                min_distance, _ = torch.min(min_distances, dim=1)
+                min_distance, _ = torch.min(distances, dim=1)
                 cluster_cost = torch.mean(min_distance)
                 l1 = model.module.last_layer.weight.norm(p=1)
 
             # evaluation statistics
-            _, predicted = torch.max(output.data, 1)
+            # Unified accuracy: pixel-level for segmentation, sample-level for classification
+            preds = output.argmax(dim=1)
+            dice_sum += (
+                2
+                * torch.sum(preds * target)
+                / (torch.sum(preds) + torch.sum(target) + 1e-6)
+            ).item()
             n_examples += target.size(0)
-            n_correct += (predicted == target).sum().item()
 
             n_batches += 1
             total_cross_entropy += cross_entropy.item()
             total_cluster_cost += cluster_cost.item()
             total_separation_cost += separation_cost.item()
-            total_avg_separation_cost += avg_separation_cost.item()
 
         # compute gradient and do SGD step
         if is_train:
@@ -133,7 +140,7 @@ def _train_or_test(
             else:
                 if coefs is not None:
                     loss = (
-                        coefs["crs_ent"] * cross_entropy
+                        coefs["seg"] * cross_entropy
                         + coefs["clst"] * cluster_cost
                         + coefs["l1"] * l1
                     )
@@ -146,8 +153,10 @@ def _train_or_test(
         del input
         del target
         del output
-        del predicted
-        del min_distances
+        del preds
+        del l1
+        del cross_entropy
+        del distances
 
     end = time.time()
 
@@ -156,19 +165,18 @@ def _train_or_test(
     log("\tcluster: \t{0}".format(total_cluster_cost / n_batches))
     if class_specific:
         log("\tseparation:\t{0}".format(total_separation_cost / n_batches))
-        log("\tavg separation:\t{0}".format(total_avg_separation_cost / n_batches))
 
     if adversarial:
-        log("\trob: \t\t{0}%".format(n_correct / n_examples * 100))
+        log("\trob: \t\t{0}%".format(dice_sum / n_batches * 100))
     else:
-        log("\taccu: \t\t{0}%".format(n_correct / n_examples * 100))
+        log("\taccu: \t\t{0}%".format(dice_sum / n_batches * 100))
     log("\tl1: \t\t{0}".format(model.module.last_layer.weight.norm(p=1).item()))
     p = model.module.prototype_vectors.view(model.module.num_prototypes, -1).cpu()
     with torch.no_grad():
         p_avg_pair_dist = torch.mean(list_of_distances(p, p))
     log("\tp dist pair: \t{0}".format(p_avg_pair_dist.item()))
 
-    return n_correct / n_examples
+    return dice_sum / n_batches
 
 
 def train(

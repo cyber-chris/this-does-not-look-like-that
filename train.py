@@ -3,6 +3,7 @@
 
 import os
 import shutil
+import yaml
 
 import torch
 import torch.utils.data
@@ -13,14 +14,16 @@ import argparse
 import re
 
 from src.utils.helpers import makedir
-from src.models import model
+from src.models import seg_model
 from src.training import push
 from src.training import prune
 from src.training import train_and_test as tnt
 
 from src.utils import save
 from src.utils.log import create_logger
+import logging
 from src.data.preprocess import mean, std, preprocess_input_function
+from src.data.raman_dataset import create_raman_mask_dataloaders_from_ids
 
 
 parser = argparse.ArgumentParser()
@@ -52,9 +55,9 @@ if colab:
     )
 else:
     model_dir = (
-        "/cluster/scratch/"
+        "/home/"
         + username
-        + "/PPNet/saved_models/"
+        + "/code/this-does-not-look-like-that/out_model/saved_models/"
         + base_architecture
         + "/"
         + experiment_run
@@ -74,6 +77,7 @@ shutil.copy(
     src=os.path.join(os.getcwd(), "src/training/", "train_and_test.py"), dst=model_dir
 )
 
+logging.basicConfig(level=logging.INFO)
 log, logclose = create_logger(log_filename=os.path.join(model_dir, "train.log"))
 img_dir = os.path.join(model_dir, "img")
 makedir(img_dir)
@@ -95,69 +99,51 @@ from settings import (
 
 normalize = transforms.Normalize(mean=mean, std=std)
 
+# config for training
+config_file = "./configs/unet_segment_newdata.yaml"
+with open(config_file, "r") as stream:
+    conf = yaml.safe_load(stream)
+
 # all datasets
 
 # train set
-train_dataset = datasets.ImageFolder(
-    train_dir,
-    transforms.Compose(
-        [
-            transforms.Resize(size=(img_size, img_size)),
-            transforms.ToTensor(),
-            normalize,
-        ]
-    ),
-)
-train_loader = torch.utils.data.DataLoader(
-    train_dataset,
-    batch_size=train_batch_size,
+train_dl = create_raman_mask_dataloaders_from_ids(
+    conf["data"]["train_ids"],
+    conf,
+    transforms=None,
     shuffle=True,
-    num_workers=4,
-    pin_memory=False,
+    is_train=True,
 )
-# push set
-train_push_dataset = datasets.ImageFolder(
-    train_push_dir,
-    transforms.Compose(
-        [transforms.Resize(size=(img_size, img_size)), transforms.ToTensor(),]
-    ),
-)
-train_push_loader = torch.utils.data.DataLoader(
-    train_push_dataset,
-    batch_size=train_push_batch_size,
+# push set, use the same config as train set
+train_push_dl = create_raman_mask_dataloaders_from_ids(
+    conf["data"]["train_ids"],
+    conf,
+    transforms=None,
     shuffle=False,
-    num_workers=4,
-    pin_memory=False,
+    is_train=True,
 )
 # test set
-test_dataset = datasets.ImageFolder(
-    test_dir,
-    transforms.Compose(
-        [
-            transforms.Resize(size=(img_size, img_size)),
-            transforms.ToTensor(),
-            normalize,
-        ]
-    ),
-)
-test_loader = torch.utils.data.DataLoader(
-    test_dataset,
-    batch_size=test_batch_size,
+val_conf = conf.copy()
+val_conf["data"]["extra_filtering"] = []
+val_conf["training"]["stride"] = val_conf["training"]["patch_size"]
+val_dl = create_raman_mask_dataloaders_from_ids(
+    val_conf["data"]["val_ids"],
+    val_conf,
     shuffle=False,
-    num_workers=4,
-    pin_memory=False,
+    is_train=False,
 )
 
 # we should look into distributed sampler more carefully at torch.utils.data.distributed.DistributedSampler(train_dataset)
-log("training set size: {0}".format(len(train_loader.dataset)))
-log("push set size: {0}".format(len(train_push_loader.dataset)))
-log("test set size: {0}".format(len(test_loader.dataset)))
+log("training set size: {0}".format(len(train_dl.dataset)))
+log("push set size: {0}".format(len(train_push_dl.dataset)))
+log("test set size: {0}".format(len(val_dl.dataset)))
 log("batch size: {0}".format(train_batch_size))
 
 
 # construct the model
-ppnet = model.construct_PPNet(
+ppnet = seg_model.construct_segmentation_PPNet(
     base_architecture=base_architecture,
+    in_channels=24,
     pretrained=True,
     img_size=img_size,
     prototype_shape=prototype_shape,
@@ -230,7 +216,7 @@ for epoch in range(num_train_epochs):
         tnt.warm_only(model=ppnet_multi, log=log)
         _ = tnt.train(
             model=ppnet_multi,
-            dataloader=train_loader,
+            dataloader=train_dl,
             optimizer=warm_optimizer,
             class_specific=class_specific,
             coefs=coefs,
@@ -238,19 +224,19 @@ for epoch in range(num_train_epochs):
         )
     else:
         tnt.joint(model=ppnet_multi, log=log)
-        joint_lr_scheduler.step()
         _ = tnt.train(
             model=ppnet_multi,
-            dataloader=train_loader,
+            dataloader=train_dl,
             optimizer=joint_optimizer,
             class_specific=class_specific,
             coefs=coefs,
             log=log,
         )
+        joint_lr_scheduler.step()
 
     accu = tnt.test(
         model=ppnet_multi,
-        dataloader=test_loader,
+        dataloader=val_dl,
         class_specific=class_specific,
         log=log,
     )
@@ -264,23 +250,24 @@ for epoch in range(num_train_epochs):
     )
 
     if epoch >= push_start and epoch in push_epochs:
-        push.push_prototypes(
-            train_push_loader,  # pytorch dataloader (must be unnormalized in [0,1])
-            prototype_network_parallel=ppnet_multi,  # pytorch network with prototype_vectors
-            class_specific=class_specific,
-            preprocess_input_function=preprocess_input_function,  # normalize if needed
-            prototype_layer_stride=1,
-            root_dir_for_saving_prototypes=img_dir,  # if not None, prototypes will be saved here
-            epoch_number=epoch,  # if not provided, prototypes saved previously will be overwritten
-            prototype_img_filename_prefix=prototype_img_filename_prefix,
-            prototype_self_act_filename_prefix=prototype_self_act_filename_prefix,
-            proto_bound_boxes_filename_prefix=proto_bound_boxes_filename_prefix,
-            save_prototype_class_identity=True,
-            log=log,
-        )
+        # TODO: implement and use prototype pushing
+        # push.push_prototypes(
+        #     train_push_dl,  # pytorch dataloader (must be unnormalized in [0,1])
+        #     prototype_network_parallel=ppnet_multi,  # pytorch network with prototype_vectors
+        #     class_specific=class_specific,
+        #     preprocess_input_function=preprocess_input_function,  # normalize if needed
+        #     prototype_layer_stride=1,
+        #     root_dir_for_saving_prototypes=img_dir,  # if not None, prototypes will be saved here
+        #     epoch_number=epoch,  # if not provided, prototypes saved previously will be overwritten
+        #     prototype_img_filename_prefix=prototype_img_filename_prefix,
+        #     prototype_self_act_filename_prefix=prototype_self_act_filename_prefix,
+        #     proto_bound_boxes_filename_prefix=proto_bound_boxes_filename_prefix,
+        #     save_prototype_class_identity=True,
+        #     log=log,
+        # )
         accu = tnt.test(
             model=ppnet_multi,
-            dataloader=test_loader,
+            dataloader=val_dl,
             class_specific=class_specific,
             log=log,
         )
@@ -295,11 +282,12 @@ for epoch in range(num_train_epochs):
 
         if prototype_activation_function != "linear":
             tnt.last_only(model=ppnet_multi, log=log)
-            for i in range(20):
+            # We don't need to train the last layer for *that* long
+            for i in range(5):
                 log("iteration: \t{0}".format(i))
                 _ = tnt.train(
                     model=ppnet_multi,
-                    dataloader=train_loader,
+                    dataloader=train_dl,
                     optimizer=last_layer_optimizer,
                     class_specific=class_specific,
                     coefs=coefs,
@@ -307,7 +295,7 @@ for epoch in range(num_train_epochs):
                 )
                 accu = tnt.test(
                     model=ppnet_multi,
-                    dataloader=test_loader,
+                    dataloader=val_dl,
                     class_specific=class_specific,
                     log=log,
                 )
