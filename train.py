@@ -22,7 +22,6 @@ from src.training import train_and_test as tnt
 from src.utils import save
 from src.utils.log import create_logger
 import logging
-from src.data.preprocess import mean, std, preprocess_input_function
 from src.data.raman_dataset import create_raman_mask_dataloaders_from_ids
 
 
@@ -97,7 +96,6 @@ from settings import (
     train_push_batch_size,
 )
 
-normalize = transforms.Normalize(mean=mean, std=std)
 
 # config for training
 config_file = "./configs/unet_segment_newdata.yaml"
@@ -250,21 +248,19 @@ for epoch in range(num_train_epochs):
     )
 
     if epoch >= push_start and epoch in push_epochs:
-        # TODO: implement and use prototype pushing
-        # push.push_prototypes(
-        #     train_push_dl,  # pytorch dataloader (must be unnormalized in [0,1])
-        #     prototype_network_parallel=ppnet_multi,  # pytorch network with prototype_vectors
-        #     class_specific=class_specific,
-        #     preprocess_input_function=preprocess_input_function,  # normalize if needed
-        #     prototype_layer_stride=1,
-        #     root_dir_for_saving_prototypes=img_dir,  # if not None, prototypes will be saved here
-        #     epoch_number=epoch,  # if not provided, prototypes saved previously will be overwritten
-        #     prototype_img_filename_prefix=prototype_img_filename_prefix,
-        #     prototype_self_act_filename_prefix=prototype_self_act_filename_prefix,
-        #     proto_bound_boxes_filename_prefix=proto_bound_boxes_filename_prefix,
-        #     save_prototype_class_identity=True,
-        #     log=log,
-        # )
+        push.push_prototypes(
+            train_push_dl,  # pytorch dataloader (must be unnormalized in [0,1])
+            prototype_network_parallel=ppnet_multi,  # pytorch network with prototype_vectors
+            class_specific=class_specific,
+            prototype_layer_stride=1,
+            root_dir_for_saving_prototypes=img_dir,  # if not None, prototypes will be saved here
+            epoch_number=epoch,  # if not provided, prototypes saved previously will be overwritten
+            prototype_img_filename_prefix=prototype_img_filename_prefix,
+            prototype_self_act_filename_prefix=prototype_self_act_filename_prefix,
+            proto_bound_boxes_filename_prefix=proto_bound_boxes_filename_prefix,
+            save_prototype_class_identity=True,
+            log=log,
+        )
         accu = tnt.test(
             model=ppnet_multi,
             dataloader=val_dl,

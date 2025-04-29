@@ -2,8 +2,8 @@ data:
   train_ids: [
     'E12198-23_sample1_half1', 
     'E12198-23_sample1_half2', 
-    # 'E12198-23_sample2_half1', 
-    # 'E12198-23_sample2_half2', 
+    'E12198-23_sample2_half1', 
+    'E12198-23_sample2_half2', 
     # 'E1223-24_sample1', 
     # 'E1223-24_sample2', 
     # 'E1223-24_sample3', 
@@ -30,9 +30,9 @@ data:
     # 'E119-24_sample1_2', 
     # 'E119-24_sample2_1_half1', 
     # 'E119-24_sample2_1_half2', 
-    # 'E919-24_sample1_1', 
-    # 'E919-24_sample1_2', 
-    # 'E919-24_sample2_1', 
+    'E919-24_sample1_1', 
+    'E919-24_sample1_2', 
+    'E919-24_sample2_1', 
     'E919-24_sample2_2'
   ]
   acdc_channels: [3, 26]
