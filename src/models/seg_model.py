@@ -58,6 +58,66 @@ base_architecture_to_features = {
     "vgg19_bn": vgg19_bn_features,
 }
 
+# ------------------------------------------------------------------
+# Atrous Spatial Pyramid Pooling (ASPP) block
+# Inspired by DeepLab‑v3: captures multi‑scale context with dilated convs
+# ------------------------------------------------------------------
+class ASPP(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int, atrous_rates=(6, 12, 18, 24)):
+        super().__init__()
+        modules = []
+        # 1×1 conv branch
+        modules.append(
+            nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False),
+                nn.BatchNorm2d(out_channels),
+                nn.ReLU(),
+            )
+        )
+        # Dilated conv branches
+        for rate in atrous_rates:
+            modules.append(
+                nn.Sequential(
+                    nn.Conv2d(
+                        in_channels,
+                        out_channels,
+                        kernel_size=3,
+                        padding=rate,
+                        dilation=rate,
+                        bias=False,
+                    ),
+                    nn.BatchNorm2d(out_channels),
+                    nn.ReLU(),
+                )
+            )
+        # Image‑level pooling branch
+        modules.append(
+            nn.Sequential(
+                nn.AdaptiveAvgPool2d(1),
+                nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False),
+                nn.BatchNorm2d(out_channels),
+                nn.ReLU(),
+            )
+        )
+        self.branches = nn.ModuleList(modules)
+        self.project = nn.Sequential(
+            nn.Conv2d(out_channels * len(modules), out_channels, kernel_size=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(),
+        )
+
+    def forward(self, x):
+        size = x.shape[2:]
+        feats = []
+        for idx, branch in enumerate(self.branches):
+            y = branch(x)
+            # Upsample the global‐pool branch
+            if idx == len(self.branches) - 1:
+                y = F.interpolate(y, size=size, mode="bilinear", align_corners=False)
+            feats.append(y)
+        x = torch.cat(feats, dim=1)
+        return self.project(x)
+
 
 class SegmentationPPNet(nn.Module):
     def __init__(
@@ -67,9 +127,9 @@ class SegmentationPPNet(nn.Module):
         prototype_shape,
         proto_layer_rf_info,
         num_classes,
-        init_weights=True,
-        prototype_activation_function="log",
-        add_on_layers_type="bottleneck",
+        init_weights,
+        prototype_activation_function,
+        add_on_layers_type,
     ):
         """
         Construct a ProtoPNet.
@@ -117,52 +177,23 @@ class SegmentationPPNet(nn.Module):
         else:
             raise Exception("other base base_architecture NOT implemented")
 
-        if add_on_layers_type == "bottleneck":
-            add_on_layers = []
-            current_in_channels = first_add_on_layer_in_channels
-            while (current_in_channels > self.prototype_shape[1]) or (
-                len(add_on_layers) == 0
-            ):
-                current_out_channels = max(
-                    self.prototype_shape[1], (current_in_channels // 2)
-                )
-                add_on_layers.append(
-                    nn.Conv2d(
-                        in_channels=current_in_channels,
-                        out_channels=current_out_channels,
-                        kernel_size=1,
-                    )
-                )
-                add_on_layers.append(nn.ReLU())
-                add_on_layers.append(
-                    nn.Conv2d(
-                        in_channels=current_out_channels,
-                        out_channels=current_out_channels,
-                        kernel_size=1,
-                    )
-                )
-                if current_out_channels > self.prototype_shape[1]:
-                    add_on_layers.append(nn.ReLU())
-                else:
-                    assert current_out_channels == self.prototype_shape[1]
-                    add_on_layers.append(nn.Sigmoid())
-                current_in_channels = current_in_channels // 2
-            self.add_on_layers = nn.Sequential(*add_on_layers)
-        else:
-            self.add_on_layers = nn.Sequential(
-                nn.Conv2d(
-                    in_channels=first_add_on_layer_in_channels,
-                    out_channels=self.prototype_shape[1],
-                    kernel_size=1,
-                ),
-                nn.ReLU(),
-                nn.Conv2d(
-                    in_channels=self.prototype_shape[1],
-                    out_channels=self.prototype_shape[1],
-                    kernel_size=1,
-                ),
-                nn.Sigmoid(),
-            )
+        # Multi‑scale context encoder
+        self.aspp = ASPP(first_add_on_layer_in_channels, first_add_on_layer_in_channels)
+
+        # ------------------------------------------------------------------
+        # Simplified add‑on projection:
+        #   single 1×1 convolution → Sigmoid gate
+        # Reduces parameter count and may curb over‑fitting.
+        # ------------------------------------------------------------------
+        self.add_on_layers = nn.Sequential(
+            nn.Conv2d(
+                in_channels=first_add_on_layer_in_channels,
+                out_channels=self.prototype_shape[1],
+                kernel_size=1,
+                bias=False,
+            ),
+            nn.Sigmoid(),
+        )
 
         self.prototype_vectors = nn.Parameter(
             torch.rand(self.prototype_shape), requires_grad=True
@@ -188,6 +219,7 @@ class SegmentationPPNet(nn.Module):
         the feature input to prototype layer
         """
         x = self.features(x)
+        x = self.aspp(x)
         x = self.add_on_layers(x)
         return x
 
@@ -293,8 +325,8 @@ class SegmentationPPNet(nn.Module):
 
         # changing self.last_layer in place
         # changing in_features and out_features make sure the numbers are consistent
-        self.last_layer.in_features = self.num_prototypes
-        self.last_layer.out_features = self.num_classes
+        self.last_layer.in_channels = self.num_prototypes
+        self.last_layer.out_channels = self.num_classes
         self.last_layer.weight.data = self.last_layer.weight.data[:, prototypes_to_keep]
 
         # self.ones is nn.Parameter
@@ -367,7 +399,7 @@ def construct_segmentation_PPNet(
     base_architecture,
     in_channels,
     pretrained=True,
-    img_size=224,
+    img_size=256,
     prototype_shape=(2000, 512, 1, 1),
     num_classes=200,
     prototype_activation_function="log",

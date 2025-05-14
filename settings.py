@@ -13,12 +13,12 @@ if base_architecture in ["resnet34"]:
 else:
     num_channels = 128
 
-prototype_shape = (200, num_channels, 1, 1)
+prototype_shape = (20, num_channels, 1, 1)
 num_classes = 2
 prototype_activation_function = "log"
 add_on_layers_type = "regular"
 
-experiment_run = "010"
+experiment_run = "011"
 
 JPEG_QUALITY = 20
 
@@ -40,14 +40,11 @@ else:
 train_dir = data_path + "train_cropped_augmented/"
 test_dir = data_path + "test_cropped/"
 train_push_dir = data_path + "train_cropped/"
-train_batch_size = 80
-test_batch_size = 100
-train_push_batch_size = 75
 
 joint_optimizer_lrs = {
-    "features": 1e-4,
-    "add_on_layers": 3e-3,
-    "prototype_vectors": 3e-3,
+    "features": 1e-5,
+    "add_on_layers": 1e-4,
+    "prototype_vectors": 1e-4,
 }
 joint_lr_step_size = 5
 

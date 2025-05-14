@@ -24,12 +24,6 @@ except ImportError as e:
     )
 
 
-def get_num_edges(img_i, threshold1=100, threshold2=200):
-    gray_patch = (cv2.cvtColor(img_i, cv2.COLOR_BGR2GRAY) * 255.0).astype(np.uint8)
-    edges = cv2.Canny(gray_patch, threshold1, threshold2)
-    return np.sum(edges > 0)
-
-
 def quantile_norm(array, q):
     array = array - np.quantile(array, q)
     array = array / np.quantile(array, 1 - q)
@@ -63,6 +57,211 @@ class AttrDict(dict):
     def __init__(self, *args, **kwargs):
         super(AttrDict, self).__init__(*args, **kwargs)
         self.__dict__ = self
+
+
+class InMemoryRamanMaskData(Dataset):
+    def _patchify(self, big_img: torch.Tensor) -> torch.Tensor:
+        # h, w, c = big_img.shape
+        ph, pw = self.patch_size
+        sh, sw = self.stride_size
+        tmp_img = big_img.unfold(0, ph, sh).unfold(1, pw, sw)  # N1, N2, C, H, W
+        tmp_img = tmp_img.reshape(
+            tmp_img.shape[0] * tmp_img.shape[1], tmp_img.shape[2], ph, pw
+        )
+        return tmp_img
+
+    def __init__(
+        self,
+        ids: list[str],
+        raman_paths: list[dict[str, str]],
+        mask_paths: list[str],
+        conf_train: dict[str, Any],
+        conf_data: dict[str, Any],
+        transforms=None,
+        wandb_conf=None,
+    ):
+        logging.info(
+            f"InMemoryRamanMaskData: conf_data={conf_data}, conf_train={conf_train}, wandb_conf={wandb_conf}"
+        )
+
+        self.raman_imgs = []
+        self.mask_imgs = []
+        self.patch_size = conf_train["patch_size"]
+        self.stride_size = conf_train["stride"]
+        self.transforms = transforms
+
+        for id_i, raman_path, mask_path in zip(ids, raman_paths, mask_paths):
+            logging.debug(f"Processing {id_i}...")
+            # Load Raman
+            if conf_data["use_srs_norm"]:
+                c_1, c_2 = 0, 21
+            else:
+                c_1, c_2 = conf_data["acdc_channels"]
+            tmp_srs_norm = np.load(raman_path["srs_norm"])
+            tmp_srs = np.load(raman_path["acdc_orig"])
+
+            assert mask_path is not None
+            tmp_mask = np.load(mask_path)
+            tmp_mask = cv2.resize(
+                tmp_mask, (tmp_srs.shape[1], tmp_srs.shape[0]), cv2.INTER_NEAREST
+            )
+            tmp_mask = torch.tensor(
+                tmp_mask.reshape(tmp_mask.shape[0], tmp_mask.shape[1], 1),
+                dtype=torch.float32,
+            )
+            mask_patches = self._patchify(tmp_mask)
+            # convert to binary classification: map classes 1 and 4 to 1, all others to 0
+            mask_patches[mask_patches == 1] = 1
+            mask_patches[mask_patches == 4] = 1
+            mask_patches[mask_patches != 1] = 0
+
+            # Filter out background patches (using just 3 channels to judge)
+            srs_patches = self._patchify(
+                torch.tensor(tmp_srs_norm[..., 0:3], dtype=torch.float32)
+            )
+            all_zero = torch.all(srs_patches == 0, dim=(1, 2, 3))
+            ids_to_include = torch.where(~all_zero)[0]
+            self.mask_imgs.append(mask_patches[ids_to_include, ...])
+
+            # Processing Raman
+            # DC
+            tmp_dc = np.load(raman_path["dc_orig"])
+            if not conf_data["use_srs_norm"]:
+                filt_ini = np.where(tmp_dc[..., c_1:c_2] < 0)
+                tmp_srs[..., c_1:c_2][filt_ini] = np.median(tmp_srs[..., c_1:c_2])
+            else:
+                tmp_srs = tmp_srs_norm
+            tmp_dc = np.mean(tmp_dc, axis=2)
+            tmp_dc = (tmp_dc - tmp_dc.min()) / (tmp_dc.max() - tmp_dc.min())
+            tmp_dc = torch.tensor(tmp_dc[..., None], dtype=torch.float32)
+
+            # tmp_srs = tmp_srs[..., [0, 4, 10, 19]] # when use_srs: lipids, paraffin, proteins, and extra channels
+            merged_raman = [
+                torch.tensor(tmp_srs[..., c_1:c_2], dtype=torch.float32),
+                tmp_dc,
+            ]
+            # AUX
+            if conf_data["use_srs_norm"]:
+                tmp_aux = torch.tensor(tmp_srs_norm[..., -2:], dtype=torch.float32)
+            else:
+                tmp_aux = torch.tensor(
+                    np.load(raman_path["aux_orig"]), dtype=torch.float32
+                )
+            merged_raman.append(tmp_aux)
+            logging.debug(
+                f"merged_raman.shapes - {merged_raman[0].shape}, {merged_raman[1].shape}, {merged_raman[2].shape}"
+            )
+            if wandb_conf is None:
+                # Using Preprocessed SRS - no need to change it
+                merged_raman = torch.concat(merged_raman, dim=2)
+                raman_imgs_tmp = self._patchify(merged_raman)[ids_to_include, ...]
+                logging.debug(f"raman_imgs_tmp.shape={raman_imgs_tmp.shape}")
+                self.raman_imgs.append(raman_imgs_tmp)  # [8, ...][None, ...])
+            else:
+                # Using raw ACDC - preprocessing it
+                merged_raman = torch.concat(merged_raman, dim=2)
+                raman_imgs_tmp = self._patchify(merged_raman)[ids_to_include, ...]
+
+                if wandb_conf.remove_negatives:
+                    logging.debug("Removing negative values...")
+                    raman_imgs_tmp[raman_imgs_tmp < 0] = 0
+
+                if wandb_conf.preprocess_norm == "perpixel_minmax":
+                    logging.debug("PREPROCESS: perpixel_minmax...")
+                    # raman_imgs_tmp: BS x Raman+DC+AUX x 256 x 256
+                    sliced_raman = raman_imgs_tmp[:, : (c_2 - c_1), ...]
+                    min_val = sliced_raman.min(dim=1).values[:, None, ...]
+                    max_val = sliced_raman.max(dim=1).values[:, None, ...]
+                    raman_imgs_tmp[:, : (c_2 - c_1), ...] = (sliced_raman - min_val) / (
+                        max_val - min_val
+                    )
+
+                    # For AUX, just having a simple minmax with 1% quantile
+                    for idx in range(raman_imgs_tmp.shape[0]):
+                        raman_imgs_tmp[idx, -2, ...] = quantile_norm(
+                            raman_imgs_tmp[idx, -2, ...], 0.001
+                        )
+                        raman_imgs_tmp[idx, -1:, ...] = quantile_norm(
+                            raman_imgs_tmp[idx, -1, ...], 0.001
+                        )
+                else:
+                    if wandb_conf.preprocess_norm == "perpatch_minmax_01":
+                        logging.debug("PREPROCESS: perpatch_minmax_01...")
+                    elif wandb_conf.preprocess_norm == "perpatch_channel_minmax_01":
+                        logging.debug("PREPROCESS: perpatch_channel_minmax_01...")
+                    else:
+                        logging.error("PREPROCESS: something weird went wrong!!")
+
+                    for idx in range(raman_imgs_tmp.shape[0]):
+                        sliced_raman = raman_imgs_tmp[idx, : (c_2 - c_1), ...]
+                        if wandb_conf.preprocess_norm == "perpatch_minmax_01":
+                            raman_imgs_tmp[idx, : (c_2 - c_1), ...] = quantile_norm(
+                                sliced_raman, 0.01
+                            )
+                        elif wandb_conf.preprocess_norm == "perpatch_channel_minmax_01":
+                            sliced_raman = sliced_raman.reshape(
+                                sliced_raman.shape[0], -1
+                            )
+                            sliced_raman = (
+                                sliced_raman
+                                - np.quantile(sliced_raman, q=0.01, axis=1)[:, None]
+                            )
+                            sliced_raman = (
+                                sliced_raman
+                                / np.quantile(sliced_raman, q=0.99, axis=1)[:, None]
+                            )
+                            # When there were divisions by zero - it could happen when only border of sample in patch
+                            #  Eg for E12198-23_sample1_half1, patch 12
+                            sliced_raman[torch.isnan(sliced_raman)] = 0
+                            sliced_raman[sliced_raman < 0] = 0
+                            sliced_raman[sliced_raman > 1] = 1
+                            raman_imgs_tmp[idx, : (c_2 - c_1), ...] = (
+                                sliced_raman.reshape(
+                                    sliced_raman.shape[0],
+                                    self.patch_size[0],
+                                    self.patch_size[1],
+                                )
+                            )
+                        # For AUX, just having a simple minmax with 1% quantile
+                        raman_imgs_tmp[idx, -2:, ...] = quantile_norm(
+                            raman_imgs_tmp[idx, -2:, ...], 0.01
+                        )
+
+                if torch.isnan(raman_imgs_tmp).any():
+                    # weird assert failures in cuda, so moving torch.where calculations to cpu
+                    where_nan = torch.where(torch.isnan(raman_imgs_tmp.cpu()))
+                    logging.debug(f"raman_imgs_tmp had {len(where_nan[0])} NaNs!")
+                    logging.debug(where_nan)
+                    raman_imgs_tmp[torch.isnan(raman_imgs_tmp)] = 0
+                logging.debug(f"raman_imgs_tmp.shape={raman_imgs_tmp.shape}")
+                self.raman_imgs.append(raman_imgs_tmp)
+
+        # Putting it all together
+        self.raman_imgs = torch.concat(self.raman_imgs)
+        self.mask_imgs = torch.concat(self.mask_imgs)
+        logging.info(f"Final Raman shape: {self.raman_imgs.shape}")
+
+        if self.raman_imgs[:, 0, ...].shape != self.mask_imgs[:, 0, ...].shape:
+            raise ValueError(
+                "Raman and binary mask must have the same initial shape. "
+                f"Instead, they have {self.raman_imgs.shape} and {self.mask_imgs.shape} respectively"
+            )
+
+    def __len__(self):
+        return self.raman_imgs.shape[0]
+
+    def __getitem__(self, idx):
+        if self.transforms:
+            raman_i, mask_i = self.raman_imgs[idx], self.mask_imgs[idx]
+            # Concatenating them together such that same transformation is done to both Raman and Mask
+            mask_and_raman = torch.cat([mask_i, raman_i], dim=0)
+
+            out = self.transforms(mask_and_raman)
+            new_mask = out[:1, ...]
+            new_raman = out[1:, ...]
+            return new_raman, new_mask
+        else:
+            return self.raman_imgs[idx], self.mask_imgs[idx]
 
 
 class ZarrRamanMaskData(Dataset):
@@ -308,7 +507,7 @@ def get_new_raman_path(raman_id: str) -> dict[str, str]:
 
 
 def create_raman_mask_dataloaders_from_ids(
-    ids, conf, transforms=None, shuffle=False, is_train=True
+    ids, conf, transforms=None, shuffle=False, in_memory=False, is_train=True
 ):
     logging.info(f"Creating Raman/Mask data loader for IDs: {ids}")
     raman_paths = []
@@ -320,20 +519,31 @@ def create_raman_mask_dataloaders_from_ids(
         mask_paths.append(
             possible_mask_path if os.path.exists(possible_mask_path) else None
         )
-    tmp_ds = ZarrRamanMaskData(
-        ids,
-        raman_paths,
-        mask_paths,
-        transforms=transforms,
-        conf_train=conf["training"],
-        conf_data=conf["data"],
-        raman_zarr_path=f"/tmp/raman_data_{'train' if is_train else 'val'}.zarr",
-        mask_zarr_path=f"/tmp/mask_data_{'train' if is_train else 'val'}.zarr",
-        hash_path=f"/tmp/zarr_hash_{'train' if is_train else 'val'}.zarr",
+    tmp_ds = (
+        InMemoryRamanMaskData(
+            ids,
+            raman_paths,
+            mask_paths,
+            transforms=transforms,
+            conf_train=conf["training"],
+            conf_data=conf["data"],
+        )
+        if in_memory
+        else ZarrRamanMaskData(
+            ids,
+            raman_paths,
+            mask_paths,
+            transforms=transforms,
+            conf_train=conf["training"],
+            conf_data=conf["data"],
+            raman_zarr_path=f"/tmp/raman_data_{'train' if is_train else 'val'}.zarr",
+            mask_zarr_path=f"/tmp/mask_data_{'train' if is_train else 'val'}.zarr",
+            hash_path=f"/tmp/zarr_hash_{'train' if is_train else 'val'}.zarr",
+        )
     )
     return DataLoader(
         tmp_ds,
         batch_size=conf["hyperparams"]["batch_size"],
         shuffle=shuffle,
-        num_workers=1,
+        num_workers=16,
     )

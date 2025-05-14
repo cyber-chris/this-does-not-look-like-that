@@ -140,7 +140,7 @@ def _train_or_test(
             else:
                 if coefs is not None:
                     loss = (
-                        coefs["seg"] * cross_entropy
+                        coefs["crs_ent"] * cross_entropy
                         + coefs["clst"] * cluster_cost
                         + coefs["l1"] * l1
                     )

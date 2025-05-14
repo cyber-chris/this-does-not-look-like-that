@@ -4,21 +4,21 @@ data:
     'E12198-23_sample1_half2', 
     'E12198-23_sample2_half1', 
     'E12198-23_sample2_half2', 
-    # 'E1223-24_sample1', 
-    # 'E1223-24_sample2', 
-    # 'E1223-24_sample3', 
-    # 'E13557-23_half1', 
-    # 'E13557-23_half2', 
-    # 'E15356-23_sample1', 
-    # 'E15356-23_sample2', 
-    # 'E15356-23_sample3', 
-    # 'E15356-23_sample4', 
-    # 'E15754-23_sample1', 
-    # 'E15754-23_sample2', 
-    # 'E15754-23_sample3', 
-    # 'E17878-23_sample1_half1', 
-    # 'E17878-23_sample1_half2', 
-    # 'E17878-23_sample2_half1'
+    'E1223-24_sample1', 
+    'E1223-24_sample2', 
+    'E1223-24_sample3', 
+    'E13557-23_half1', 
+    'E13557-23_half2', 
+    'E15356-23_sample1', 
+    'E15356-23_sample2', 
+    'E15356-23_sample3', 
+    'E15356-23_sample4', 
+    'E15754-23_sample1', 
+    'E15754-23_sample2', 
+    'E15754-23_sample3', 
+    'E17878-23_sample1_half1', 
+    'E17878-23_sample1_half2', 
+    'E17878-23_sample2_half1'
   ]
   val_ids: [
     # 'E341-24_sample3',
@@ -53,5 +53,5 @@ model:
   output_dim: 1
   # pretrained_path: "/home/ct678/code/CHARM/saved_models/segment_unet_256_epoch_50.pth"
 hyperparams:
-  batch_size: 12 # NOTE: different when running on HPC
+  batch_size: 36 # NOTE: different when running on HPC
   n_epochs: 30

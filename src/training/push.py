@@ -16,15 +16,7 @@ def push_prototypes(
     prototype_network_parallel,  # pytorch network with prototype_vectors
     class_specific=True,
     preprocess_input_function=None,  # normalize if needed
-    prototype_layer_stride=1,
-    root_dir_for_saving_prototypes=None,  # if not None, prototypes will be saved here
-    epoch_number=None,  # if not provided, prototypes saved previously will be overwritten
-    prototype_img_filename_prefix=None,
-    prototype_self_act_filename_prefix=None,
-    proto_bound_boxes_filename_prefix=None,
-    save_prototype_class_identity=True,  # which class the prototype image comes from
     log=print,
-    prototype_activation_function_in_numpy=None,
 ):
 
     prototype_network_parallel.eval()
@@ -53,19 +45,18 @@ def push_prototypes(
 
         update_prototypes_on_batch(
             search_batch_input,
-            start_index_of_search_batch,
             prototype_network_parallel,
             global_min_proto_dist,
             global_min_fmap_patches,
-            None,
-            None,
             class_specific=class_specific,
             seg_mask=seg_mask,
-            num_classes=num_classes,
             preprocess_input_function=preprocess_input_function,
         )
 
     log("\tExecuting push ...")
+    # Log distances between each prototype and its best matching feature map patch
+    for proto_idx, min_dist in enumerate(global_min_proto_dist):
+        log(f"\tPrototype {proto_idx}: min distance = {min_dist:.4f}")
     prototype_update = np.reshape(global_min_fmap_patches, tuple(prototype_shape))
     prototype_network_parallel.module.prototype_vectors.data.copy_(
         torch.tensor(prototype_update, dtype=torch.float32).cuda()
@@ -78,20 +69,12 @@ def push_prototypes(
 # update each prototype for current search batch
 def update_prototypes_on_batch(
     search_batch_input,
-    start_index_of_search_batch,
     prototype_network_parallel,
     global_min_proto_dist,  # this will be updated
     global_min_fmap_patches,  # this will be updated
-    proto_rf_boxes,  # this will be updated (unused)
-    proto_bound_boxes,  # this will be updated (unused)
     class_specific=True,
     seg_mask=None,  # required if class_specific == True
-    num_classes=None,  # required if class_specific == True
     preprocess_input_function=None,
-    dir_for_saving_prototypes=None,  # removed
-    prototype_img_filename_prefix=None,  # removed
-    prototype_self_act_filename_prefix=None,  # removed
-    prototype_activation_function_in_numpy=None,  # removed
 ):
 
     prototype_network_parallel.eval()
