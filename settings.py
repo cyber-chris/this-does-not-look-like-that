@@ -42,7 +42,7 @@ test_dir = data_path + "test_cropped/"
 train_push_dir = data_path + "train_cropped/"
 
 joint_optimizer_lrs = {
-    "features": 1e-5,
+    "features": 5e-6,
     "add_on_layers": 1e-4,
     "prototype_vectors": 1e-4,
 }

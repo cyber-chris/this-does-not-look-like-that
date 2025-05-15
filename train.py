@@ -325,7 +325,7 @@ if __name__ == "__main__":
     push_epochs = hyperparams.push_epochs
 
     arches = ["resnet34"]
-    features_lrs = [1e-5]
+    features_lrs = [5e-6]
     add_on_layers_lrs = [1e-4]
     prototype_vectors_lrs = [1e-4]
 
