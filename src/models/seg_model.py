@@ -196,9 +196,9 @@ class SegmentationPPNet(nn.Module):
             nn.BatchNorm2d(intermediate_channels),
             nn.ReLU(),
             # Optional: another 3x3 convolution
-            # nn.Conv2d(intermediate_channels, intermediate_channels, kernel_size=3, padding=1, bias=False),
-            # nn.BatchNorm2d(intermediate_channels),
-            # nn.ReLU(),
+            nn.Conv2d(intermediate_channels, intermediate_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(intermediate_channels),
+            nn.ReLU(),
             # Final 1x1 convolution to project to prototype depth
             nn.Conv2d(intermediate_channels, self.prototype_shape[1], kernel_size=1, bias=False),
             nn.Sigmoid() # If Sigmoid is desired before prototype distances
