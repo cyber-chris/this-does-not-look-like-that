@@ -6,14 +6,12 @@ import getpass
 
 username = getpass.getuser()
 
-base_architecture = "resnet34"
-img_size = 256
-if base_architecture in ["resnet34"]:
-    num_channels = 256
-else:
-    num_channels = 128
+base_architecture = "resnet18"
+img_size = 512
+num_channels = 64
 
-prototype_shape = (20, num_channels, 1, 1)
+num_prototypes = 20
+# prototype_shape = (20, num_channels, 1, 1)
 num_classes = 2
 prototype_activation_function = "log"
 add_on_layers_type = "regular"
@@ -42,28 +40,27 @@ test_dir = data_path + "test_cropped/"
 train_push_dir = data_path + "train_cropped/"
 
 joint_optimizer_lrs = {
-    "features": 5e-6,
+    "features": 1e-5,
     "add_on_layers": 1e-4,
     "prototype_vectors": 1e-4,
 }
 joint_lr_step_size = 5
 
-warm_optimizer_lrs = {"add_on_layers": 3e-3, "prototype_vectors": 3e-3}
+warm_optimizer_lrs = {"add_on_layers": 1e-4, "prototype_vectors": 1e-4}
 
 last_layer_optimizer_lr = 1e-4
 
 coefs = {
     "crs_ent": 1,
-    "clst": 0.8,
-    "sep": -0.08,
+    "lam": 0.25,
     "l1": 1e-4,
 }
 
-num_train_epochs = 21
-num_warm_epochs = 5
+num_train_epochs = 11
+num_warm_epochs = 11
 
-push_start = 10
-push_epochs = [i for i in range(num_train_epochs) if i % 10 == 0]
+push_start = 5
+push_epochs = [i for i in range(push_start, num_train_epochs, 5)]
 
 
 # configuration for adversarial training

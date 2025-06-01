@@ -323,10 +323,13 @@ class ZarrRamanMaskData(Dataset):
             logging.info(
                 f"Final Raman shape: {self.raman_zarr.shape}, Mask shape: {self.mask_zarr.shape}"
             )
-            if self.raman_zarr[:, 0, ...].shape != self.mask_zarr[:, 0, ...].shape:
+            # Fast shape check without loading data slices: compare batch, height, and width dimensions
+            r_shape = self.raman_zarr.shape
+            m_shape = self.mask_zarr.shape
+            if r_shape[0] != m_shape[0] or r_shape[2] != m_shape[2] or r_shape[3] != m_shape[3]:
                 raise ValueError(
-                    "Raman and binary mask must have the same shape, ignoring channels. "
-                    f"Instead, they have {self.raman_zarr.shape} and {self.mask_zarr.shape} respectively"
+                    "Raman and binary mask must have the same shape (excluding channels). "
+                    f"Instead, they have {r_shape} and {m_shape} respectively"
                 )
             return
         else:
@@ -507,7 +510,7 @@ def get_new_raman_path(raman_id: str) -> dict[str, str]:
 
 
 def create_raman_mask_dataloaders_from_ids(
-    ids, conf, transforms=None, shuffle=False, in_memory=False, is_train=True
+    ids, conf, transforms=None, shuffle=False, in_memory=False, is_train=True, be_fast=True,
 ):
     logging.info(f"Creating Raman/Mask data loader for IDs: {ids}")
     raman_paths = []
@@ -545,5 +548,9 @@ def create_raman_mask_dataloaders_from_ids(
         tmp_ds,
         batch_size=conf["hyperparams"]["batch_size"],
         shuffle=shuffle,
-        num_workers=16,
+        num_workers=16 if be_fast else 8,
+        pin_memory=True,
+        pin_memory_device="cuda" if torch.cuda.is_available() else "cpu",
+        persistent_workers=be_fast,
+        prefetch_factor=2 if be_fast else 1,
     )

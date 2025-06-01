@@ -21,11 +21,6 @@ data:
     'E17878-23_sample2_half1'
   ]
   val_ids: [
-    # 'E341-24_sample3',
-    # 'E341-24_sample4',
-    # 'E341-24_sample5',
-    # 'E341-24_sample6',
-    # 'E341-24_sample7',
     # 'E119-24_sample1_1-half1', 
     # 'E119-24_sample1_2', 
     # 'E119-24_sample2_1_half1', 
@@ -34,6 +29,11 @@ data:
     'E919-24_sample1_2', 
     'E919-24_sample2_1', 
     'E919-24_sample2_2'
+    # 'E341-24_sample3',
+    # 'E341-24_sample4',
+    # 'E341-24_sample5',
+    # 'E341-24_sample6',
+    # 'E341-24_sample7',
   ]
   acdc_channels: [3, 26]
   use_srs_norm: True
@@ -42,16 +42,16 @@ data:
     # 'E919-24_sample1_1', 'E919-24_sample2_1', 'E919-24_sample1_2', 'E919-24_sample2_2',
   ]
 training:
-  patch_size: [ 256, 256 ]
+  patch_size: [ 512, 512 ]
   stride: [ 256, 256 ]
 task: 'segment'
 name: 'segment_unet_01_newdata'
 model:
   type: 'unet'
-  latent_dim: 256
+  latent_dim: 128
   input_dim: 24
   output_dim: 1
   # pretrained_path: "/home/ct678/code/CHARM/saved_models/segment_unet_256_epoch_50.pth"
 hyperparams:
-  batch_size: 36 # NOTE: different when running on HPC
+  batch_size: 16 # NOTE: different when running on HPC
   n_epochs: 30

@@ -9,12 +9,12 @@ import torch
 import torch.utils.data
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
+import optuna
 
 import argparse
 import re
 
 import importlib.util
-from itertools import product
 
 from src.utils.helpers import makedir
 from src.models import seg_model
@@ -28,11 +28,36 @@ import logging
 from src.data.raman_dataset import create_raman_mask_dataloaders_from_ids
 
 
-def run_training():
-    # print the key hyperparameters
-    print("base_architecture: ", base_architecture)
-    print("joint_optimizer_lrs: ", joint_optimizer_lrs)
+# Optuna objective function for hyperparameter search
+def objective(trial):
+    # Sample hyperparameters
+    base_arch = "resnet18"
+    # num_proto = trial.suggest_int("num_prototypes", 20, 50, step=10)
+    num_proto = 50
+    # num_proto = 20
+    # features_lr = trial.suggest_float("features_lr", 1e-6, 6e-6, log=True)
+    features_lr = 1e-6
+    # add_on_layers_lr = trial.suggest_float("add_on_layers_lr", 1e-4, 3e-4, log=True)
+    # prototype_vectors_lr = trial.suggest_float("prototype_vectors_lr", 1e-4, 5e-4, log=True)
+    # _joint_lr_step_size = trial.suggest_int("joint_lr_step_size", 5, 10, step=1)
+    # lam_coeff = trial.suggest_float("lam_coeff", 0.01, 0.8)
+    lam_coeff = 0.25
+    # l1_coeff = trial.suggest_float("l1_coeff", 3e-4, 1e-3, log=True)
 
+    # Override hyperparams
+    global base_architecture, num_prototypes, joint_optimizer_lrs, coefs, experiment_run
+    base_architecture = base_arch
+    num_prototypes = num_proto
+    joint_optimizer_lrs["features"] = features_lr
+    coefs["lam"] = lam_coeff
+    experiment_run = f"optuna_trial_{trial.number}"
+
+    # Run training and return validation accuracy
+    val_acc = run_training()
+    return val_acc
+
+
+def run_training():
     base_architecture_type = re.match("^[a-z]*", base_architecture).group(0)
 
     if colab:
@@ -86,13 +111,20 @@ def run_training():
 
     # all datasets
 
+    data_transforms = transforms.Compose(
+        [
+            transforms.RandomHorizontalFlip(p=0.5),
+        ]
+    )
+
     # train set
     train_dl = create_raman_mask_dataloaders_from_ids(
         conf["data"]["train_ids"],
         conf,
-        transforms=None,
+        transforms=data_transforms,
         shuffle=True,
         is_train=True,
+        be_fast=True,
     )
     # push set, use the same config as train set
     train_push_dl = create_raman_mask_dataloaders_from_ids(
@@ -101,6 +133,7 @@ def run_training():
         transforms=None,
         shuffle=False,
         is_train=True,
+        be_fast=False,
     )
     # test set
     val_conf = conf.copy()
@@ -111,8 +144,13 @@ def run_training():
         val_conf,
         shuffle=False,
         is_train=False,
+        be_fast=False,
     )
 
+    log(
+        f"Running experiment with arch: {base_architecture}, num_proto: {num_prototypes}, "
+        f"features_lr: {joint_optimizer_lrs['features']}, lam_coeff: {coefs['lam']}"
+    )
     # we should look into distributed sampler more carefully at torch.utils.data.distributed.DistributedSampler(train_dataset)
     log("training set size: {0}".format(len(train_dl.dataset)))
     log("push set size: {0}".format(len(train_push_dl.dataset)))
@@ -120,6 +158,7 @@ def run_training():
     log("train batch size: {0}".format(train_dl.batch_size))
 
     # construct the model
+    prototype_shape = (num_prototypes, num_channels, 1, 1)
     ppnet = seg_model.construct_segmentation_PPNet(
         base_architecture=base_architecture,
         in_channels=24,
@@ -134,7 +173,6 @@ def run_training():
     #    ppnet.set_last_layer_incorrect_connection(incorrect_strength=0)
     ppnet = ppnet.cuda()
     ppnet_multi = torch.nn.DataParallel(ppnet)
-    class_specific = True
 
     # define optimizer
     joint_optimizer_specs = [
@@ -156,11 +194,11 @@ def run_training():
             "params": ppnet.aspp.parameters(),
             "lr": warm_optimizer_lrs["add_on_layers"],
             "weight_decay": 1e-3,
-        }
+        },
     ]
     joint_optimizer = torch.optim.Adam(joint_optimizer_specs)
     joint_lr_scheduler = torch.optim.lr_scheduler.StepLR(
-        joint_optimizer, step_size=joint_lr_step_size, gamma=0.1
+        joint_optimizer, step_size=joint_lr_step_size, gamma=0.5
     )
 
     warm_optimizer_specs = [
@@ -177,7 +215,7 @@ def run_training():
             "params": ppnet.aspp.parameters(),
             "lr": warm_optimizer_lrs["add_on_layers"],
             "weight_decay": 1e-3,
-        }
+        },
     ]
     warm_optimizer = torch.optim.Adam(warm_optimizer_specs)
 
@@ -189,7 +227,8 @@ def run_training():
     # train the model
     log("start training")
 
-    target_accu = 0.6
+    target_accu = 0.65
+    accu = 0.0
     for epoch in range(num_train_epochs):
         log("epoch: \t{0}".format(epoch))
 
@@ -199,7 +238,6 @@ def run_training():
                 model=ppnet_multi,
                 dataloader=train_dl,
                 optimizer=warm_optimizer,
-                class_specific=class_specific,
                 coefs=coefs,
                 log=log,
             )
@@ -209,7 +247,6 @@ def run_training():
                 model=ppnet_multi,
                 dataloader=train_dl,
                 optimizer=joint_optimizer,
-                class_specific=class_specific,
                 coefs=coefs,
                 log=log,
             )
@@ -218,7 +255,6 @@ def run_training():
         accu = tnt.test(
             model=ppnet_multi,
             dataloader=val_dl,
-            class_specific=class_specific,
             log=log,
         )
         save.save_model_w_condition(
@@ -235,13 +271,11 @@ def run_training():
             # push.push_prototypes(
             #     train_push_dl,  # pytorch dataloader (must be unnormalized in [0,1])
             #     prototype_network_parallel=ppnet_multi,  # pytorch network with prototype_vectors
-            #     class_specific=class_specific,
             #     log=log,
             # )
             accu = tnt.test(
                 model=ppnet_multi,
                 dataloader=val_dl,
-                class_specific=class_specific,
                 log=log,
             )
             save.save_model_w_condition(
@@ -256,20 +290,18 @@ def run_training():
             if prototype_activation_function != "linear":
                 tnt.last_only(model=ppnet_multi, log=log)
                 # We don't need to train the last layer for *that* long
-                for i in range(5):
+                for i in range(2):
                     log("iteration: \t{0}".format(i))
                     _ = tnt.train(
                         model=ppnet_multi,
                         dataloader=train_dl,
                         optimizer=last_layer_optimizer,
-                        class_specific=class_specific,
                         coefs=coefs,
                         log=log,
                     )
                     accu = tnt.test(
                         model=ppnet_multi,
                         dataloader=val_dl,
-                        class_specific=class_specific,
                         log=log,
                     )
                     save.save_model_w_condition(
@@ -282,6 +314,7 @@ def run_training():
                     )
 
     logclose()
+    return accu
 
 
 if __name__ == "__main__":
@@ -307,7 +340,8 @@ if __name__ == "__main__":
     # Override settings values with hyperparams
     base_architecture = hyperparams.base_architecture
     img_size = hyperparams.img_size
-    prototype_shape = hyperparams.prototype_shape
+    num_prototypes = hyperparams.num_prototypes
+    num_channels = hyperparams.num_channels
     num_classes = hyperparams.num_classes
     prototype_activation_function = hyperparams.prototype_activation_function
     add_on_layers_type = hyperparams.add_on_layers_type
@@ -324,23 +358,12 @@ if __name__ == "__main__":
     push_start = hyperparams.push_start
     push_epochs = hyperparams.push_epochs
 
-    arches = ["resnet34"]
-    features_lrs = [5e-6]
-    add_on_layers_lrs = [1e-4]
-    prototype_vectors_lrs = [1e-4]
+    # Run Optuna hyperparameter search
+    study = optuna.create_study(direction="maximize")
+    study.optimize(objective, n_trials=100)
 
-    experiment_id = 12
-    for arch in arches:
-        for features_lr, add_on_lr, prototype_vectors_lr in product(
-            features_lrs, add_on_layers_lrs, prototype_vectors_lrs
-        ):
-            base_architecture = arch
-            joint_optimizer_lrs["features"] = features_lr
-            joint_optimizer_lrs["add_on_layers"] = add_on_lr
-            joint_optimizer_lrs["prototype_vectors"] = prototype_vectors_lr
-            experiment_run = str(experiment_id)
-            experiment_id += 1
-            print(
-                f"Running experiment with arch: {arch}, features_lr: {features_lr}, add_on_lr: {add_on_lr}, prototype_vectors_lr: {prototype_vectors_lr}"
-            )
-            run_training()
+    print("Best trial:")
+    print(f"  Value: {study.best_value}")
+    print("  Params:")
+    for key, value in study.best_params.items():
+        print(f"    {key}: {value}")

@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import torch.utils.model_zoo as model_zoo
 import torch.nn.functional as F
+import math
 
 import sys
 
@@ -165,6 +166,10 @@ class SegmentationPPNet(nn.Module):
         # this has to be named features to allow the precise loading
         self.features = features
 
+        # we store the last feature map generated
+        self.feature_map = None
+        self.similarity_maps = None
+
         features_name = str(self.features).upper()
         if features_name.startswith("VGG") or features_name.startswith("RES"):
             first_add_on_layer_in_channels = [
@@ -178,26 +183,33 @@ class SegmentationPPNet(nn.Module):
             raise Exception("other base base_architecture NOT implemented")
 
         # Multi‑scale context encoder
-        self.aspp = ASPP(first_add_on_layer_in_channels, first_add_on_layer_in_channels)
+        # self.aspp = ASPP(
+        #     first_add_on_layer_in_channels,
+        #     first_add_on_layer_in_channels,
+        #     atrous_rates=(1, 3, 6),
+        # )
+        self.aspp = nn.Identity()
 
-        # ------------------------------------------------------------------
-        # Simplified add‑on projection:
-        #   single 1×1 convolution → Sigmoid gate
-        # Reduces parameter count and may curb over‑fitting.
-        # ------------------------------------------------------------------
+        intermediate_channels = first_add_on_layer_in_channels
         self.add_on_layers = nn.Sequential(
-            nn.Conv2d(
-                in_channels=first_add_on_layer_in_channels,
-                out_channels=self.prototype_shape[1],
-                kernel_size=1,
-                bias=False,
-            ),
-            nn.Sigmoid(),
+            nn.Conv2d(first_add_on_layer_in_channels, intermediate_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(intermediate_channels),
+            nn.ReLU(),
+            # Optional: another 3x3 convolution
+            # nn.Conv2d(intermediate_channels, intermediate_channels, kernel_size=3, padding=1, bias=False),
+            # nn.BatchNorm2d(intermediate_channels),
+            # nn.ReLU(),
+            # Final 1x1 convolution to project to prototype depth
+            nn.Conv2d(intermediate_channels, self.prototype_shape[1], kernel_size=1, bias=False),
+            nn.Sigmoid() # If Sigmoid is desired before prototype distances
         )
 
-        self.prototype_vectors = nn.Parameter(
-            torch.rand(self.prototype_shape), requires_grad=True
-        )
+        # Scale‑aware prototype initialization (Xavier uniform)
+        torch.manual_seed(42)  # keep determinism
+        fan_in = self.prototype_shape[1] * self.prototype_shape[2] * self.prototype_shape[3]
+        bound = 1.0 / math.sqrt(fan_in)
+        init_proto = torch.empty(self.prototype_shape).uniform_(-bound, bound)
+        self.prototype_vectors = nn.Parameter(init_proto, requires_grad=True)
 
         # do not make this just a tensor,
         # since it will not be moved automatically to gpu
@@ -275,6 +287,7 @@ class SegmentationPPNet(nn.Module):
         x is the raw input
         """
         conv_features = self.conv_features(x)
+        self.feature_map = conv_features
         distances = self._l2_convolution(conv_features)
         return distances
 
@@ -290,6 +303,7 @@ class SegmentationPPNet(nn.Module):
         # Modified forward pass for segmentation
         distances = self.prototype_distances(x)
         similarity_maps = self.distance_2_similarity(distances)
+        self.similarity_maps = similarity_maps
 
         score_maps = self.last_layer(similarity_maps)
         logits_full_upsampled = F.interpolate(
@@ -298,7 +312,7 @@ class SegmentationPPNet(nn.Module):
             mode="bilinear",
             align_corners=False,
         )
-        return logits_full_upsampled, distances
+        return logits_full_upsampled, score_maps
 
     def push_forward(self, x):
         """this method is needed for the pushing operation"""
