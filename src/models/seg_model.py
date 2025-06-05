@@ -105,6 +105,7 @@ class ASPP(nn.Module):
             nn.Conv2d(out_channels * len(modules), out_channels, kernel_size=1, bias=False),
             nn.BatchNorm2d(out_channels),
             nn.ReLU(),
+            nn.Dropout2d(p=0.5),
         )
 
     def forward(self, x):
@@ -130,7 +131,7 @@ class SegmentationPPNet(nn.Module):
         num_classes,
         init_weights,
         prototype_activation_function,
-        add_on_layers_type,
+        intermediate_channels=512,
     ):
         """
         Construct a ProtoPNet.
@@ -186,22 +187,22 @@ class SegmentationPPNet(nn.Module):
         # self.aspp = ASPP(
         #     first_add_on_layer_in_channels,
         #     first_add_on_layer_in_channels,
-        #     atrous_rates=(1, 3, 6),
+        #     atrous_rates=(6, 12),
         # )
         self.aspp = nn.Identity()
 
-        intermediate_channels = first_add_on_layer_in_channels
         self.add_on_layers = nn.Sequential(
             nn.Conv2d(first_add_on_layer_in_channels, intermediate_channels, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(intermediate_channels),
             nn.ReLU(),
-            # Optional: another 3x3 convolution
+            nn.Dropout2d(p=0.4),  # Dropout for regularization
+            # # Optional: another 3x3 convolution
             nn.Conv2d(intermediate_channels, intermediate_channels, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(intermediate_channels),
             nn.ReLU(),
+            nn.Dropout2d(p=0.4),  # Dropout for regularization
             # Final 1x1 convolution to project to prototype depth
             nn.Conv2d(intermediate_channels, self.prototype_shape[1], kernel_size=1, bias=False),
-            nn.Sigmoid() # If Sigmoid is desired before prototype distances
         )
 
         # Scale‑aware prototype initialization (Xavier uniform)
@@ -417,7 +418,7 @@ def construct_segmentation_PPNet(
     prototype_shape=(2000, 512, 1, 1),
     num_classes=200,
     prototype_activation_function="log",
-    add_on_layers_type="bottleneck",
+    intermediate_channels=512,
 ):
     """Construct a ProtoPNet.
     Args:
@@ -462,5 +463,5 @@ def construct_segmentation_PPNet(
         num_classes=num_classes,
         init_weights=True,
         prototype_activation_function=prototype_activation_function,
-        add_on_layers_type=add_on_layers_type,
+        intermediate_channels=intermediate_channels,
     )

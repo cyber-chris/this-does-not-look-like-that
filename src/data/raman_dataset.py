@@ -292,6 +292,7 @@ class ZarrRamanMaskData(Dataset):
             f"ZarrRamanMaskData: conf_data={conf_data}, conf_train={conf_train}, wandb_conf={wandb_conf}"
         )
 
+        self.ids = ids
         self.patch_size = conf_train["patch_size"]
         self.stride_size = conf_train["stride"]
         self.transforms = transforms
@@ -479,9 +480,9 @@ class ZarrRamanMaskData(Dataset):
             out = self.transforms(combined)
             new_mask = out[:1, ...]
             new_raman = out[1:, ...]
-            return new_raman, new_mask
+            return new_raman, new_mask, idx
         else:
-            return raman_sample, mask_sample
+            return raman_sample, mask_sample, idx
 
 
 def get_new_raman_path(raman_id: str) -> dict[str, str]:
@@ -548,9 +549,9 @@ def create_raman_mask_dataloaders_from_ids(
         tmp_ds,
         batch_size=conf["hyperparams"]["batch_size"],
         shuffle=shuffle,
-        num_workers=16 if be_fast else 8,
-        pin_memory=True,
-        pin_memory_device="cuda" if torch.cuda.is_available() else "cpu",
-        persistent_workers=be_fast,
-        prefetch_factor=2 if be_fast else 1,
+        num_workers=20 if is_train else 2,
+        pin_memory=False,
+        # pin_memory_device="cuda" if torch.cuda.is_available() else "cpu",
+        persistent_workers=True,
+        prefetch_factor=4,
     )

@@ -145,6 +145,17 @@ def activation_overlap_loss(
     return (loss_acc / n_classes) * lambda_div
 
 
+# Soft multi-class Dice loss
+def dice_loss(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    pred = pred.contiguous().view(pred.size(0), pred.size(1), -1)
+    target = target.contiguous().view(target.size(0), target.size(1), -1)
+
+    intersection = 2.0 * (pred * target).sum(-1)
+    denominator = pred.sum(-1) + target.sum(-1)
+    dice = (intersection + eps) / (denominator + eps)
+    return 1.0 - dice.mean()
+
+
 def _train_or_test(
     model,
     dataloader,
@@ -176,8 +187,9 @@ def _train_or_test(
     n_batches = 0
     total_cross_entropy = 0
     total_diversity_loss = 0
+    total_dice_loss = 0
 
-    for i, (image, seg_mask) in enumerate(dataloader):
+    for i, (image, seg_mask, _) in enumerate(dataloader):
         input = image.cuda()
         target = seg_mask.cuda()
         target = target.squeeze(1).long()
@@ -196,6 +208,12 @@ def _train_or_test(
             cross_entropy = torch.nn.functional.cross_entropy(
                 score_maps, downsampled_target,
             )
+
+            latent_probs = F.softmax(score_maps, dim=1)
+            target_one_hot = F.one_hot(
+                downsampled_target, num_classes=latent_probs.size(1)
+            ).permute(0, 3, 1, 2).float().cuda()
+            dice_loss_val = dice_loss(latent_probs, target_one_hot)
 
             # cross_entropy = torch.nn.functional.cross_entropy(output, target)
 
@@ -234,17 +252,21 @@ def _train_or_test(
             n_batches += 1
             total_cross_entropy += cross_entropy.item()
             total_diversity_loss += overlap_loss.item()
+            total_dice_loss += dice_loss_val.item()
 
         # compute gradient and do SGD step
         if is_train:
             if coefs is not None:
                 loss = (
                     coefs["crs_ent"] * cross_entropy
+                    + coefs.get("dice", 0.5) * dice_loss_val
                     + coefs["lam"] * overlap_loss
                     + coefs["l1"] * l1
                 )
             else:
-                loss = cross_entropy + 0.25 * overlap_loss + 1e-4 * l1
+                # loss = cross_entropy + 0.25 * overlap_loss + 1e-4 * l1
+                loss = cross_entropy + dice_loss_val + 0.25 * overlap_loss + 1e-4 * l1
+
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -257,12 +279,14 @@ def _train_or_test(
         del cross_entropy
         del overlap_loss
         del score_maps
+        del dice_loss_val
 
     end = time.time()
 
     log("\ttime: \t{0}".format(end - start))
     log("\tcross ent: \t{0}".format(total_cross_entropy / n_batches))
     log("\tdiversity: \t{0}".format(total_diversity_loss / n_batches))
+    log("\tdice loss: \t{0}".format(total_dice_loss / n_batches))
 
     log("\taccu: \t\t{0}%".format(dice_sum / n_batches * 100))
     log("\tl1: \t\t{0}".format(model.module.last_layer.weight.norm(p=1).item()))
@@ -323,6 +347,9 @@ def last_only(model, log=print):
 def warm_only(model, log=print):
     for p in model.module.features.parameters():
         p.requires_grad = False
+    # allow training of last feature layer
+    for p in model.module.features.layer4.parameters():
+        p.requires_grad = True
     for p in model.module.add_on_layers.parameters():
         p.requires_grad = True
     model.module.prototype_vectors.requires_grad = True

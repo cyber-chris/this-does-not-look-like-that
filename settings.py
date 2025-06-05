@@ -8,13 +8,13 @@ username = getpass.getuser()
 
 base_architecture = "resnet18"
 img_size = 512
-num_channels = 64
+num_channels = 128
 
 num_prototypes = 20
 # prototype_shape = (20, num_channels, 1, 1)
 num_classes = 2
 prototype_activation_function = "log"
-add_on_layers_type = "regular"
+intermediate_channels = 512
 
 experiment_run = "011"
 
@@ -46,7 +46,11 @@ joint_optimizer_lrs = {
 }
 joint_lr_step_size = 5
 
-warm_optimizer_lrs = {"add_on_layers": 1e-4, "prototype_vectors": 1e-4}
+warm_optimizer_lrs = {
+    "features": 1e-5,
+    "add_on_layers": 1e-4, 
+    "prototype_vectors": 1e-4
+}
 
 last_layer_optimizer_lr = 1e-4
 
@@ -56,11 +60,11 @@ coefs = {
     "l1": 1e-4,
 }
 
-num_train_epochs = 11
-num_warm_epochs = 11
+num_train_epochs = 15
+num_warm_epochs = 15
 
-push_start = 5
-push_epochs = [i for i in range(push_start, num_train_epochs, 5)]
+push_start = 12
+push_epochs = [i for i in range(push_start, num_train_epochs, push_start)]
 
 
 # configuration for adversarial training

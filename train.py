@@ -32,25 +32,29 @@ from src.data.raman_dataset import create_raman_mask_dataloaders_from_ids
 def objective(trial):
     # Sample hyperparameters
     base_arch = "resnet18"
-    # num_proto = trial.suggest_int("num_prototypes", 20, 50, step=10)
-    num_proto = 50
-    # num_proto = 20
+    # num_proto = trial.suggest_int("num_prototypes", 20, 120, step=10)
+    num_proto = 30
     # features_lr = trial.suggest_float("features_lr", 1e-6, 6e-6, log=True)
-    features_lr = 1e-6
+    # features_lr = 1e-6
     # add_on_layers_lr = trial.suggest_float("add_on_layers_lr", 1e-4, 3e-4, log=True)
     # prototype_vectors_lr = trial.suggest_float("prototype_vectors_lr", 1e-4, 5e-4, log=True)
     # _joint_lr_step_size = trial.suggest_int("joint_lr_step_size", 5, 10, step=1)
     # lam_coeff = trial.suggest_float("lam_coeff", 0.01, 0.8)
-    lam_coeff = 0.25
+    lam_coeff = 0.01
     # l1_coeff = trial.suggest_float("l1_coeff", 3e-4, 1e-3, log=True)
+    l1_coeff = 1e-4
+    # _intermediate_channels = trial.suggest_int("intermediate_channels", 128, 512, step=128)
+    _intermediate_channels = 128
 
     # Override hyperparams
-    global base_architecture, num_prototypes, joint_optimizer_lrs, coefs, experiment_run
+    global base_architecture, num_prototypes, joint_optimizer_lrs, coefs, experiment_run, intermediate_channels
     base_architecture = base_arch
     num_prototypes = num_proto
-    joint_optimizer_lrs["features"] = features_lr
+    # joint_optimizer_lrs["features"] = features_lr
     coefs["lam"] = lam_coeff
+    coefs["l1"] = l1_coeff
     experiment_run = f"optuna_trial_{trial.number}"
+    intermediate_channels = _intermediate_channels
 
     # Run training and return validation accuracy
     val_acc = run_training()
@@ -114,6 +118,7 @@ def run_training():
     data_transforms = transforms.Compose(
         [
             transforms.RandomHorizontalFlip(p=0.5),
+            transforms.RandomVerticalFlip(p=0.5),
         ]
     )
 
@@ -150,6 +155,7 @@ def run_training():
     log(
         f"Running experiment with arch: {base_architecture}, num_proto: {num_prototypes}, "
         f"features_lr: {joint_optimizer_lrs['features']}, lam_coeff: {coefs['lam']}"
+        f", intermediate_channels: {intermediate_channels}, experiment_run: {experiment_run}"
     )
     # we should look into distributed sampler more carefully at torch.utils.data.distributed.DistributedSampler(train_dataset)
     log("training set size: {0}".format(len(train_dl.dataset)))
@@ -167,7 +173,7 @@ def run_training():
         prototype_shape=prototype_shape,
         num_classes=num_classes,
         prototype_activation_function=prototype_activation_function,
-        add_on_layers_type=add_on_layers_type,
+        intermediate_channels=intermediate_channels,
     )
     # if prototype_activation_function == 'linear':
     #    ppnet.set_last_layer_incorrect_connection(incorrect_strength=0)
@@ -202,6 +208,12 @@ def run_training():
     )
 
     warm_optimizer_specs = [
+        {
+            # allow last feature layer training
+            "params": ppnet.features.layer4.parameters(),
+            "lr": warm_optimizer_lrs["features"],
+            "weight_decay": 1e-3,
+        },
         {
             "params": ppnet.add_on_layers.parameters(),
             "lr": warm_optimizer_lrs["add_on_layers"],
@@ -290,7 +302,7 @@ def run_training():
             if prototype_activation_function != "linear":
                 tnt.last_only(model=ppnet_multi, log=log)
                 # We don't need to train the last layer for *that* long
-                for i in range(2):
+                for i in range(1):
                     log("iteration: \t{0}".format(i))
                     _ = tnt.train(
                         model=ppnet_multi,
@@ -344,7 +356,7 @@ if __name__ == "__main__":
     num_channels = hyperparams.num_channels
     num_classes = hyperparams.num_classes
     prototype_activation_function = hyperparams.prototype_activation_function
-    add_on_layers_type = hyperparams.add_on_layers_type
+    intermediate_channels = hyperparams.intermediate_channels
     experiment_run = hyperparams.experiment_run
     colab = hyperparams.colab
     username = hyperparams.username

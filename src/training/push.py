@@ -36,14 +36,21 @@ def push_prototypes(
     global_proto_regions = np.zeros(
         [n_prototypes, ph, pw, 24]
     )  # stores the receptive field of each prototype
+    global_index_location = np.zeros(n_prototypes, dtype=int)  # original index of the patch in our dataset
+    global_proto_bounds = np.zeros(
+        [n_prototypes, 4], dtype=int
+    )  # stores the bounding box of the prototype region w.r.t. the patch
 
-    for push_iter, (search_batch_input, seg_mask) in enumerate(dataloader):
+    for push_iter, (search_batch_input, seg_mask, original_index_batch) in enumerate(dataloader):
         update_prototypes_on_batch(
             search_batch_input,
+            original_index_batch,
             prototype_network_parallel,
             global_min_proto_dist,
             global_min_fmap_patches,
             global_proto_regions,
+            global_index_location,
+            global_proto_bounds,
             seg_mask=seg_mask,
             preprocess_input_function=preprocess_input_function,
         )
@@ -62,11 +69,13 @@ def push_prototypes(
             os.path.join("prototypes", f"prototype_{proto_idx:02d}.npz"),
             region=proto_region,
         )
+    with open("prototypes/prototype_bounds.txt", "w") as f:
+        for proto_idx, bounds in enumerate(global_proto_bounds):
+            f.write(f"Prototype {proto_idx}: index={global_index_location[proto_idx]}, bounds={bounds.tolist()}\n")
     prototype_update = np.reshape(global_min_fmap_patches, tuple(prototype_shape))
     prototype_network_parallel.module.prototype_vectors.data.copy_(
         torch.tensor(prototype_update, dtype=torch.float32).cuda()
     )
-    # prototype_network_parallel.cuda()
     end = time.time()
     log("\tpush time: \t{0}".format(end - start))
 
@@ -74,10 +83,13 @@ def push_prototypes(
 # update each prototype for current search batch
 def update_prototypes_on_batch(
     search_batch_input,
+    original_index_batch,
     prototype_network_parallel,
     global_min_proto_dist,  # this will be updated
     global_min_fmap_patches,  # this will be updated
     global_proto_regions,  # this will be updated
+    global_index_location, # this will be updated
+    global_proto_bounds, # this will be updated
     seg_mask=None,
     preprocess_input_function=None,
 ):
@@ -132,6 +144,9 @@ def update_prototypes_on_batch(
             )
 
             img_index_in_batch = batch_argmin_proto_dist_j[0]
+            # original index of the image in our dataset
+            original_index = original_index_batch[img_index_in_batch]
+            global_index_location[j] = original_index
             fmap_height_start_index = batch_argmin_proto_dist_j[1] * stride_h
             fmap_width_start_index = batch_argmin_proto_dist_j[2] * stride_w
 
@@ -187,6 +202,7 @@ def update_prototypes_on_batch(
                 interpolation=cv2.INTER_CUBIC,
             )
             proto_bound_j = find_high_activation_crop(upsampled_act_img_j)
+            global_proto_bounds[j] = proto_bound_j
             # crop out the image patch with high activation as prototype image
             proto_img_j = original_img_j[
                 proto_bound_j[0] : proto_bound_j[1],
