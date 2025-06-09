@@ -549,7 +549,7 @@ def create_raman_mask_dataloaders_from_ids(
         tmp_ds,
         batch_size=conf["hyperparams"]["batch_size"],
         shuffle=shuffle,
-        num_workers=20 if is_train else 2,
+        num_workers=20 if is_train else 4,
         pin_memory=False,
         # pin_memory_device="cuda" if torch.cuda.is_available() else "cpu",
         persistent_workers=True,

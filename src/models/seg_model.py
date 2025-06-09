@@ -121,6 +121,58 @@ class ASPP(nn.Module):
         return self.project(x)
 
 
+# ------------------------------------------------------------------
+# Lightweight upsampling / decoder utilities
+# ------------------------------------------------------------------
+
+class Interpolate(nn.Module):
+    """Module wrapper around F.interpolate so that the upsampling strategy
+    can be swapped out at run‑time."""
+    def __init__(self, size=None, scale_factor=None,
+                 mode="bilinear", align_corners=False):
+        super().__init__()
+        self.size = size
+        self.scale_factor = scale_factor
+        self.mode = mode
+        self.align_corners = align_corners
+
+    def forward(self, x):
+        return F.interpolate(
+            x,
+            size=self.size,
+            scale_factor=self.scale_factor,
+            mode=self.mode,
+            align_corners=self.align_corners,
+        )
+
+class LiteDecoder(nn.Module):
+    """A minimal convolutional decoder; can be replaced by heavier variants."""
+    def __init__(self, in_channels, mid_channels=64,
+                 out_channels=None, num_upsample=2, dropout_p=0.0):
+        super().__init__()
+        if out_channels is None:
+            out_channels = in_channels
+        layers = [
+            nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(mid_channels),
+            nn.ReLU(inplace=True),
+            nn.Dropout(p=dropout_p) if dropout_p > 0 else nn.Identity(),
+        ]
+        for _ in range(num_upsample):
+            layers.extend([
+                nn.ConvTranspose2d(mid_channels, mid_channels,
+                                   kernel_size=2, stride=2, bias=False),
+                nn.BatchNorm2d(mid_channels),
+                nn.ReLU(inplace=True),
+                nn.Dropout(p=dropout_p) if dropout_p > 0 else nn.Identity(),
+            ])
+        layers.append(nn.Conv2d(mid_channels, out_channels, kernel_size=1))
+        self.decoder = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.decoder(x)
+
+
 class SegmentationPPNet(nn.Module):
     def __init__(
         self,
@@ -132,6 +184,8 @@ class SegmentationPPNet(nn.Module):
         init_weights,
         prototype_activation_function,
         intermediate_channels=512,
+        decoder=None,
+        upsample_mode="bilinear",
     ):
         """
         Construct a ProtoPNet.
@@ -187,7 +241,7 @@ class SegmentationPPNet(nn.Module):
         # self.aspp = ASPP(
         #     first_add_on_layer_in_channels,
         #     first_add_on_layer_in_channels,
-        #     atrous_rates=(6, 12),
+        #     atrous_rates=(6,),
         # )
         self.aspp = nn.Identity()
 
@@ -195,12 +249,12 @@ class SegmentationPPNet(nn.Module):
             nn.Conv2d(first_add_on_layer_in_channels, intermediate_channels, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(intermediate_channels),
             nn.ReLU(),
-            nn.Dropout2d(p=0.4),  # Dropout for regularization
+            nn.Dropout2d(p=0.5),  # Dropout for regularization
             # # Optional: another 3x3 convolution
             nn.Conv2d(intermediate_channels, intermediate_channels, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(intermediate_channels),
             nn.ReLU(),
-            nn.Dropout2d(p=0.4),  # Dropout for regularization
+            nn.Dropout2d(p=0.5),  # Dropout for regularization
             # Final 1x1 convolution to project to prototype depth
             nn.Conv2d(intermediate_channels, self.prototype_shape[1], kernel_size=1, bias=False),
         )
@@ -222,6 +276,23 @@ class SegmentationPPNet(nn.Module):
             out_channels=self.num_classes,
             kernel_size=1,
             bias=False,
+        )
+
+        # ------------------------------------------------------------------
+        # Pluggable decoder / upsampler
+        # ------------------------------------------------------------------
+        self.decoder = nn.Identity() if decoder is None else decoder
+        # self.decoder = LiteDecoder(
+        #     in_channels=2,
+        #     mid_channels=2,
+        #     out_channels=2,
+        #     num_upsample=2,  # number of upsampling layers
+        #     dropout_p=0.25,  # dropout probability
+        # )
+        self.upsampler = Interpolate(
+            size=(self.img_size, self.img_size),
+            mode=upsample_mode,
+            align_corners=False,
         )
 
         if init_weights:
@@ -307,13 +378,9 @@ class SegmentationPPNet(nn.Module):
         self.similarity_maps = similarity_maps
 
         score_maps = self.last_layer(similarity_maps)
-        logits_full_upsampled = F.interpolate(
-            score_maps,
-            size=(self.img_size, self.img_size),
-            mode="bilinear",
-            align_corners=False,
-        )
-        return logits_full_upsampled, score_maps
+        decoded = self.decoder(score_maps)
+        logits_full_upsampled = self.upsampler(decoded)
+        return logits_full_upsampled, decoded
 
     def push_forward(self, x):
         """this method is needed for the pushing operation"""
@@ -415,10 +482,12 @@ def construct_segmentation_PPNet(
     in_channels,
     pretrained=True,
     img_size=256,
-    prototype_shape=(2000, 512, 1, 1),
-    num_classes=200,
+    prototype_shape=(200, 512, 1, 1),
+    num_classes=2,
     prototype_activation_function="log",
     intermediate_channels=512,
+    decoder=None,
+    upsample_mode="bilinear",
 ):
     """Construct a ProtoPNet.
     Args:
@@ -464,4 +533,6 @@ def construct_segmentation_PPNet(
         init_weights=True,
         prototype_activation_function=prototype_activation_function,
         intermediate_channels=intermediate_channels,
+        decoder=decoder,
+        upsample_mode=upsample_mode,
     )

@@ -8,7 +8,7 @@ username = getpass.getuser()
 
 base_architecture = "resnet18"
 img_size = 512
-num_channels = 128
+num_channels = 64
 
 num_prototypes = 20
 # prototype_shape = (20, num_channels, 1, 1)
@@ -48,11 +48,11 @@ joint_lr_step_size = 5
 
 warm_optimizer_lrs = {
     "features": 1e-5,
-    "add_on_layers": 1e-4, 
-    "prototype_vectors": 1e-4
+    "add_on_layers": 5e-4, 
+    "prototype_vectors": 5e-4
 }
 
-last_layer_optimizer_lr = 1e-4
+last_layer_optimizer_lr = 1e-5
 
 coefs = {
     "crs_ent": 1,
@@ -63,8 +63,8 @@ coefs = {
 num_train_epochs = 15
 num_warm_epochs = 15
 
-push_start = 12
-push_epochs = [i for i in range(push_start, num_train_epochs, push_start)]
+push_start = 14
+push_epochs = [14]
 
 
 # configuration for adversarial training

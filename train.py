@@ -32,22 +32,26 @@ from src.data.raman_dataset import create_raman_mask_dataloaders_from_ids
 def objective(trial):
     # Sample hyperparameters
     base_arch = "resnet18"
-    # num_proto = trial.suggest_int("num_prototypes", 20, 120, step=10)
-    num_proto = 30
+    # num_proto = trial.suggest_int("num_prototypes", 20, 120, step=20)
+    num_proto = 120
     # features_lr = trial.suggest_float("features_lr", 1e-6, 6e-6, log=True)
     # features_lr = 1e-6
     # add_on_layers_lr = trial.suggest_float("add_on_layers_lr", 1e-4, 3e-4, log=True)
     # prototype_vectors_lr = trial.suggest_float("prototype_vectors_lr", 1e-4, 5e-4, log=True)
     # _joint_lr_step_size = trial.suggest_int("joint_lr_step_size", 5, 10, step=1)
-    # lam_coeff = trial.suggest_float("lam_coeff", 0.01, 0.8)
-    lam_coeff = 0.01
+    # lam_coeff = trial.suggest_float("lam_coeff", 0.2, 1.0, step=0.2)
+    lam_coeff = 0.2
     # l1_coeff = trial.suggest_float("l1_coeff", 3e-4, 1e-3, log=True)
     l1_coeff = 1e-4
     # _intermediate_channels = trial.suggest_int("intermediate_channels", 128, 512, step=128)
     _intermediate_channels = 128
+    # _dice_weight = trial.suggest_float("dice_weight", 0.0, 0.8, step=0.1)
+    _dice_weight = 0.7
+    # _label_smoothing = trial.suggest_float("label_smoothing", 0.0, 0.2, step=0.05)
+    _label_smoothing = 0.0
 
     # Override hyperparams
-    global base_architecture, num_prototypes, joint_optimizer_lrs, coefs, experiment_run, intermediate_channels
+    global base_architecture, num_prototypes, joint_optimizer_lrs, coefs, experiment_run, intermediate_channels, dice_weight, label_smoothing
     base_architecture = base_arch
     num_prototypes = num_proto
     # joint_optimizer_lrs["features"] = features_lr
@@ -55,6 +59,8 @@ def objective(trial):
     coefs["l1"] = l1_coeff
     experiment_run = f"optuna_trial_{trial.number}"
     intermediate_channels = _intermediate_channels
+    dice_weight = _dice_weight
+    label_smoothing = _label_smoothing
 
     # Run training and return validation accuracy
     val_acc = run_training()
@@ -117,8 +123,8 @@ def run_training():
 
     data_transforms = transforms.Compose(
         [
-            transforms.RandomHorizontalFlip(p=0.5),
-            transforms.RandomVerticalFlip(p=0.5),
+            # transforms.RandomHorizontalFlip(p=0.5),
+            # transforms.RandomVerticalFlip(p=0.5),
         ]
     )
 
@@ -154,8 +160,9 @@ def run_training():
 
     log(
         f"Running experiment with arch: {base_architecture}, num_proto: {num_prototypes}, "
-        f"features_lr: {joint_optimizer_lrs['features']}, lam_coeff: {coefs['lam']}"
+        f"lam_coeff: {coefs['lam']}"
         f", intermediate_channels: {intermediate_channels}, experiment_run: {experiment_run}"
+        f", dice_weight: {dice_weight}, label_smoothing: {label_smoothing}"
     )
     # we should look into distributed sampler more carefully at torch.utils.data.distributed.DistributedSampler(train_dataset)
     log("training set size: {0}".format(len(train_dl.dataset)))
@@ -164,7 +171,7 @@ def run_training():
     log("train batch size: {0}".format(train_dl.batch_size))
 
     # construct the model
-    prototype_shape = (num_prototypes, num_channels, 1, 1)
+    prototype_shape = (num_prototypes, num_channels, 3, 3)
     ppnet = seg_model.construct_segmentation_PPNet(
         base_architecture=base_architecture,
         in_channels=24,
@@ -228,6 +235,11 @@ def run_training():
             "lr": warm_optimizer_lrs["add_on_layers"],
             "weight_decay": 1e-3,
         },
+        {
+            "params": ppnet.decoder.parameters(),
+            "lr": warm_optimizer_lrs["add_on_layers"],
+            "weight_decay": 1e-3,
+        },
     ]
     warm_optimizer = torch.optim.Adam(warm_optimizer_specs)
 
@@ -252,6 +264,8 @@ def run_training():
                 optimizer=warm_optimizer,
                 coefs=coefs,
                 log=log,
+                dice_weight=dice_weight,
+                label_smoothing=label_smoothing,
             )
         else:
             tnt.joint(model=ppnet_multi, log=log)
@@ -261,6 +275,8 @@ def run_training():
                 optimizer=joint_optimizer,
                 coefs=coefs,
                 log=log,
+                dice_weight=dice_weight,
+                label_smoothing=label_smoothing,
             )
             joint_lr_scheduler.step()
 
@@ -280,11 +296,11 @@ def run_training():
 
         if epoch >= push_start and epoch in push_epochs:
             # TODO: need to get good performance without pushing first
-            # push.push_prototypes(
-            #     train_push_dl,  # pytorch dataloader (must be unnormalized in [0,1])
-            #     prototype_network_parallel=ppnet_multi,  # pytorch network with prototype_vectors
-            #     log=log,
-            # )
+            push.push_prototypes(
+                train_push_dl,  # pytorch dataloader (must be unnormalized in [0,1])
+                prototype_network_parallel=ppnet_multi,  # pytorch network with prototype_vectors
+                log=log,
+            )
             accu = tnt.test(
                 model=ppnet_multi,
                 dataloader=val_dl,
@@ -310,6 +326,8 @@ def run_training():
                         optimizer=last_layer_optimizer,
                         coefs=coefs,
                         log=log,
+                        dice_weight=dice_weight,
+                        label_smoothing=label_smoothing,
                     )
                     accu = tnt.test(
                         model=ppnet_multi,
@@ -372,7 +390,10 @@ if __name__ == "__main__":
 
     # Run Optuna hyperparameter search
     study = optuna.create_study(direction="maximize")
-    study.optimize(objective, n_trials=100)
+    study.optimize(objective, n_trials=20)
+    study.trials_dataframe().to_csv(
+        os.path.join(os.getcwd(), "optuna_trials.csv"), index=False
+    )
 
     print("Best trial:")
     print(f"  Value: {study.best_value}")

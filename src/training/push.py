@@ -171,11 +171,14 @@ def update_prototypes_on_batch(
             global_min_proto_dist[j] = batch_min_proto_dist_j
             global_min_fmap_patches[j] = batch_min_fmap_patch_j
 
-            # get receptive field boundary of image patch
+            # clamp spatial indices so they never exceed the proto‑layer grid
             protoL_rf_info = prototype_network_parallel.module.proto_layer_rf_info
+            h_idx_clamped = min(batch_argmin_proto_dist_j[1], protoL_rf_info[0] - 1)
+            w_idx_clamped = min(batch_argmin_proto_dist_j[2], protoL_rf_info[0] - 1)
+
             rf_prototype_j = compute_rf_prototype(
                 search_batch.size(2),
-                batch_argmin_proto_dist_j,
+                [batch_argmin_proto_dist_j[0], h_idx_clamped, w_idx_clamped],
                 protoL_rf_info
             )
 

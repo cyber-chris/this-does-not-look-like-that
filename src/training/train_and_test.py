@@ -13,8 +13,7 @@ def downsampled(tensor, ref_tensor):
     return F.interpolate(
         tensor,
         size=ref_tensor.shape[-2:],
-        mode="bilinear",
-        align_corners=False,
+        mode="nearest",
     )
 
 
@@ -164,6 +163,8 @@ def _train_or_test(
     coefs=None,
     log=print,
     adversarial=False,
+    dice_weight=0.5,
+    label_smoothing=0.1,
 ):
     """
     Train or test.
@@ -182,14 +183,15 @@ def _train_or_test(
 
     is_train = optimizer is not None
     start = time.time()
-    dice_sum = 0
     n_examples = 0
     n_batches = 0
     total_cross_entropy = 0
     total_diversity_loss = 0
     total_dice_loss = 0
+    accu_sum = 0
 
     for i, (image, seg_mask, _) in enumerate(dataloader):
+        batch_start_time = time.time()
         input = image.cuda()
         target = seg_mask.cuda()
         target = target.squeeze(1).long()
@@ -203,17 +205,22 @@ def _train_or_test(
 
             # compute loss on latent score maps and downsampled target mask
             downsampled_target = downsampled(
-                target.unsqueeze(0).float(), ref_tensor=score_maps
-            ).squeeze(0).long()
+                target.unsqueeze(1).float(), ref_tensor=score_maps
+            ).squeeze(1).long()
             cross_entropy = torch.nn.functional.cross_entropy(
-                score_maps, downsampled_target,
+                score_maps, downsampled_target, label_smoothing=label_smoothing
             )
 
-            latent_probs = F.softmax(score_maps, dim=1)
+            probs = F.softmax(score_maps, dim=1)
             target_one_hot = F.one_hot(
-                downsampled_target, num_classes=latent_probs.size(1)
+                downsampled_target, num_classes=probs.size(1)
             ).permute(0, 3, 1, 2).float().cuda()
-            dice_loss_val = dice_loss(latent_probs, target_one_hot)
+            dice_loss_val = dice_loss(probs, target_one_hot)
+            # target_one_hot = F.one_hot(
+            #     target, num_classes=output.size(1)
+            # ).permute(0, 3, 1, 2).float().cuda()
+            # probs = F.softmax(output, dim=1)
+            # dice_loss_val = dice_loss(probs, target_one_hot)
 
             # cross_entropy = torch.nn.functional.cross_entropy(output, target)
 
@@ -240,13 +247,9 @@ def _train_or_test(
                 l1 = model.module.last_layer.weight.norm(p=1)
 
             # evaluation statistics
-            # Unified accuracy: pixel-level for segmentation, sample-level for classification
+            # pixel accuracy
             preds = output.argmax(dim=1)
-            dice_sum += (
-                2
-                * torch.sum(preds * target)
-                / (torch.sum(preds) + torch.sum(target) + 1e-6)
-            ).item()
+            accu_sum += torch.sum(preds == target).item() / target.numel()
             n_examples += target.size(0)
 
             n_batches += 1
@@ -258,13 +261,15 @@ def _train_or_test(
         if is_train:
             if coefs is not None:
                 loss = (
-                    coefs["crs_ent"] * cross_entropy
-                    + coefs.get("dice", 0.5) * dice_loss_val
+                    # CE probably better than dice when training on downsampled space
+                    1.0 * cross_entropy
+                    + dice_weight * dice_loss_val
                     + coefs["lam"] * overlap_loss
                     + coefs["l1"] * l1
                 )
             else:
                 # loss = cross_entropy + 0.25 * overlap_loss + 1e-4 * l1
+                raise Exception("coefs must be provided for training")
                 loss = cross_entropy + dice_loss_val + 0.25 * overlap_loss + 1e-4 * l1
 
             optimizer.zero_grad()
@@ -280,6 +285,8 @@ def _train_or_test(
         del overlap_loss
         del score_maps
         del dice_loss_val
+        batch_end_time = time.time()
+        # log(f"took {batch_end_time - batch_start_time:.2f} seconds ")
 
     end = time.time()
 
@@ -288,14 +295,14 @@ def _train_or_test(
     log("\tdiversity: \t{0}".format(total_diversity_loss / n_batches))
     log("\tdice loss: \t{0}".format(total_dice_loss / n_batches))
 
-    log("\taccu: \t\t{0}%".format(dice_sum / n_batches * 100))
+    log("\taccu: \t\t{0}%".format(accu_sum / n_batches * 100))
     log("\tl1: \t\t{0}".format(model.module.last_layer.weight.norm(p=1).item()))
     p = model.module.prototype_vectors.view(model.module.num_prototypes, -1).cpu()
     with torch.no_grad():
         p_avg_pair_dist = torch.mean(list_of_distances(p, p))
     log("\tp dist pair: \t{0}".format(p_avg_pair_dist.item()))
 
-    return dice_sum / n_batches
+    return accu_sum / n_batches
 
 
 def train(
@@ -305,6 +312,8 @@ def train(
     coefs=None,
     log=print,
     adversarial=False,
+    dice_weight=0.5,
+    label_smoothing=0.1,
 ):
     assert optimizer is not None
 
@@ -317,6 +326,8 @@ def train(
         coefs=coefs,
         log=log,
         adversarial=adversarial,
+        dice_weight=dice_weight,
+        label_smoothing=label_smoothing,
     )
 
 
@@ -350,9 +361,13 @@ def warm_only(model, log=print):
     # allow training of last feature layer
     for p in model.module.features.layer4.parameters():
         p.requires_grad = True
+    for p in model.module.aspp.parameters():
+        p.requires_grad = True
     for p in model.module.add_on_layers.parameters():
         p.requires_grad = True
     model.module.prototype_vectors.requires_grad = True
+    for p in model.module.decoder.parameters():
+        p.requires_grad = True
     for p in model.module.last_layer.parameters():
         p.requires_grad = True
 
@@ -362,9 +377,13 @@ def warm_only(model, log=print):
 def joint(model, log=print):
     for p in model.module.features.parameters():
         p.requires_grad = True
+    for p in model.module.aspp.parameters():
+        p.requires_grad = True
     for p in model.module.add_on_layers.parameters():
         p.requires_grad = True
     model.module.prototype_vectors.requires_grad = True
+    for p in model.module.decoder.parameters():
+        p.requires_grad = True
     for p in model.module.last_layer.parameters():
         p.requires_grad = True
 
