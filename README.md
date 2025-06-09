@@ -6,3 +6,5 @@ My fork heavily modifies it, to support segmentation training, inspired by Proto
 
 - Requirements in `requirements.txt`
 - Main training code in `train.py`
+- New model arch in `src/models/seg_model.py`
+- Misc notebooks to generate graphs, e.g. `model_result.ipynb` for the results.
