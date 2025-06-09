@@ -45,32 +45,33 @@ def augment():
     for i in range(len(folders)):
         fd = folders[i]
         tfd = target_folders[i]
+        repeat = 2
         # rotation
         p = Augmentor.Pipeline(source_directory=fd, output_directory=tfd)
         p.rotate(probability=1, max_left_rotation=15, max_right_rotation=15)
         p.flip_left_right(probability=0.5)
-        for i in range(10):
+        for i in range(repeat):
             p.process()
         del p
         # skew
         p = Augmentor.Pipeline(source_directory=fd, output_directory=tfd)
         p.skew(probability=1, magnitude=0.2)  # max 45 degrees
         p.flip_left_right(probability=0.5)
-        for i in range(10):
+        for i in range(repeat):
             p.process()
         del p
         # shear
         p = Augmentor.Pipeline(source_directory=fd, output_directory=tfd)
         p.shear(probability=1, max_shear_left=10, max_shear_right=10)
         p.flip_left_right(probability=0.5)
-        for i in range(10):
+        for i in range(repeat):
             p.process()
         del p
         # random_distortion
         p = Augmentor.Pipeline(source_directory=fd, output_directory=tfd)
         p.random_distortion(probability=1.0, grid_width=10, grid_height=10, magnitude=5)
         p.flip_left_right(probability=0.5)
-        for i in range(10):
+        for i in range(repeat):
             p.process()
         del p
 

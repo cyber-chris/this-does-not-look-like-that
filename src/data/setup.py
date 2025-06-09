@@ -24,8 +24,8 @@ def setup_test_image(idx):
         DIR = "/content/"
         OUT = "/content/PPNet/"
     else:
-        DIR = "/cluster/scratch/{}/PPNet/".format(username)
-        OUT = "/scratch/PPNet/"
+        DIR = "/home/ct678/code/this-does-not-look-like-that/"
+        OUT = "/home/ct678/code/this-does-not-look-like-that/out_model/"
 
     train_test_split = pd.read_csv(
         DIR + "CUB_200_2011/train_test_split.txt", sep=" ", header=None
@@ -84,8 +84,8 @@ def setup_data(num_classes=200):
         DIR = "/content/"
         OUT = "/content/PPNet/"
     else:
-        DIR = "/cluster/scratch/{}/PPNet/".format(username)
-        OUT = "/scratch/PPNet/"
+        DIR = "/home/ct678/code/this-does-not-look-like-that/"
+        OUT = "/home/ct678/code/this-does-not-look-like-that/out_model/"
 
     train_test_split = pd.read_csv(
         DIR + "CUB_200_2011/train_test_split.txt", sep=" ", header=None

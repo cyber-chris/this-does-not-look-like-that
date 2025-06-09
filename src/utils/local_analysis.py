@@ -165,8 +165,8 @@ class LocalAnalysis(object):
         experiment_run = load_model_dir.split("/")[-2]
 
         self.save_analysis_path = (
-            "/cluster/scratch/{}/PPNet/local_analysis_attack{}/".format(
-                username, attack
+            "/home/ct678/code/this-does-not-look-like-that/local_analysis_attack{}/".format(
+                attack
             )
             + model_base_architecture
             + "-"
