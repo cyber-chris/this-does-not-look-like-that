@@ -59,10 +59,7 @@ base_architecture_to_features = {
     "vgg19_bn": vgg19_bn_features,
 }
 
-# ------------------------------------------------------------------
-# Atrous Spatial Pyramid Pooling (ASPP) block
-# Inspired by DeepLab‑v3: captures multi‑scale context with dilated convs
-# ------------------------------------------------------------------
+# ASPP, unused
 class ASPP(nn.Module):
     def __init__(self, in_channels: int, out_channels: int, atrous_rates=(6, 12, 18, 24)):
         super().__init__()
@@ -121,13 +118,7 @@ class ASPP(nn.Module):
         return self.project(x)
 
 
-# ------------------------------------------------------------------
-# Lightweight upsampling / decoder utilities
-# ------------------------------------------------------------------
-
 class Interpolate(nn.Module):
-    """Module wrapper around F.interpolate so that the upsampling strategy
-    can be swapped out at run‑time."""
     def __init__(self, size=None, scale_factor=None,
                  mode="bilinear", align_corners=False):
         super().__init__()
@@ -237,24 +228,18 @@ class SegmentationPPNet(nn.Module):
         else:
             raise Exception("other base base_architecture NOT implemented")
 
-        # Multi‑scale context encoder
-        # self.aspp = ASPP(
-        #     first_add_on_layer_in_channels,
-        #     first_add_on_layer_in_channels,
-        #     atrous_rates=(6,),
-        # )
         self.aspp = nn.Identity()
 
         self.add_on_layers = nn.Sequential(
             nn.Conv2d(first_add_on_layer_in_channels, intermediate_channels, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(intermediate_channels),
             nn.ReLU(),
-            nn.Dropout2d(p=0.5),  # Dropout for regularization
-            # # Optional: another 3x3 convolution
+            nn.Dropout2d(p=0.5),
+            # another 3x3 convolution
             nn.Conv2d(intermediate_channels, intermediate_channels, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(intermediate_channels),
             nn.ReLU(),
-            nn.Dropout2d(p=0.5),  # Dropout for regularization
+            nn.Dropout2d(p=0.5),
             # Final 1x1 convolution to project to prototype depth
             nn.Conv2d(intermediate_channels, self.prototype_shape[1], kernel_size=1, bias=False),
         )
@@ -278,9 +263,6 @@ class SegmentationPPNet(nn.Module):
             bias=False,
         )
 
-        # ------------------------------------------------------------------
-        # Pluggable decoder / upsampler
-        # ------------------------------------------------------------------
         self.decoder = nn.Identity() if decoder is None else decoder
         # self.decoder = LiteDecoder(
         #     in_channels=2,

@@ -23,9 +23,7 @@ def _jeffrey_divergence(
     u = u + eps
     v = v + eps
 
-    # KL(u‖v)
     kl_uv = torch.sum(u * (torch.log(u) - torch.log(v)))
-    # KL(v‖u)
     kl_vu = torch.sum(v * (torch.log(v) - torch.log(u)))
 
     return 0.5 * (kl_uv + kl_vu)
@@ -58,35 +56,30 @@ def prototype_diversity_loss(
     bsz, d, h, w = feature_map.shape
     n_classes = int(proto_classes.max().item() + 1)
 
-    # Move channels last for easier indexing.
-    feat_flat = feature_map.permute(0, 2, 3, 1).reshape(bsz, h * w, d)  # (B, N, D)
-    lab_flat = labels.view(bsz, -1)  # (B, N)
+    feat_flat = feature_map.permute(0, 2, 3, 1).reshape(bsz, h * w, d)
+    lab_flat = labels.view(bsz, -1)
 
     loss_acc = 0.0
     for b in range(bsz):
         for c in range(n_classes):
-            # mask for class *c* in sample *b*
             idx = (lab_flat[b] == c).nonzero(as_tuple=True)[0]
             if idx.numel() == 0:
-                continue  # class absent in this sample
+                continue
 
             prot_idx = (proto_classes == c).nonzero(as_tuple=True)[0]
             if prot_idx.numel() < 2:
-                continue  # Need at least two prototypes to compare.
+                continue
 
-            # Feature vectors for class‑c pixels
-            z_c = feat_flat[b, idx]  # (N_c, D)
+            z_c = feat_flat[b, idx]
 
-            # Build probability vectors v(Z, p) for every prototype p∈P_c
             v_list = []
             for p_id in prot_idx:
-                p = prototypes[p_id]  # (D,)
-                # Euclidean distances to all selected pixels
-                dist = torch.norm(z_c - p, dim=1) / temperature  # (N_c,)
-                v = F.softmax(dist, dim=0)  # (N_c,)
+                p = prototypes[p_id]
+                dist = torch.norm(z_c - p, dim=1) / temperature
+                v = F.softmax(dist, dim=0)
                 v_list.append(v)
 
-            v_stack = torch.stack(v_list)  # (K, N_c)
+            v_stack = torch.stack(v_list)
             sj = _jeffrey_similarity(v_stack)
             loss_acc = loss_acc + sj
 
@@ -94,35 +87,20 @@ def prototype_diversity_loss(
     return loss * lambda_j
 
 
-# --- Activation-overlap loss for prototype diversity ---------------------------
 def activation_overlap_loss(
     similarity_maps: torch.Tensor,
     proto_classes: torch.Tensor,
     lambda_div: float = 0.25,
     eps: float = 1e-6,
 ) -> torch.Tensor:
-    """
-    Prototype–activation overlap loss.
-    Encourages prototypes of the same class to fire on disjoint regions.
-
-    Args:
-        similarity_maps: tensor of shape (B, P, H, W) with similarity
-                         scores for every prototype.
-        proto_classes:   tensor of shape (P,) that maps each prototype
-                         to its semantic class index.
-        lambda_div:      scalar weight applied to the loss.
-        eps:             numerical stability term.
-    """
     if lambda_div == 0.0:
         return torch.zeros((), device=similarity_maps.device)
 
     # Keep only positive evidence.
-    acts = similarity_maps.clamp(min=0)          # (B, P, H, W)
+    acts = similarity_maps.clamp(min=0)
     B, P, H, W = acts.shape
     S = H * W
-    acts = acts.view(B, P, S)                    # (B, P, S)
-
-    # L1‑normalise each activation map so that it sums to 1.
+    acts = acts.view(B, P, S)
     acts = acts / (acts.sum(dim=2, keepdim=True) + eps)
 
     n_classes = int(proto_classes.max().item() + 1)
@@ -133,10 +111,8 @@ def activation_overlap_loss(
         if k < 2:
             continue
 
-        a_c = acts[:, prot_idx]                  # (B, k, S)
-        # Pairwise inner products <Â_i, Â_j>
-        sim = torch.einsum("bks,bls->bkl", a_c, a_c)  # (B, k, k)
-        # Upper‑triangular without diagonal
+        a_c = acts[:, prot_idx]
+        sim = torch.einsum("bks,bls->bkl", a_c, a_c)
         sim_pairs = sim[:, torch.triu_indices(k, k, offset=1)[0],
                            torch.triu_indices(k, k, offset=1)[1]]
         loss_acc += sim_pairs.mean()
